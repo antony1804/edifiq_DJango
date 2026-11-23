@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="eyebrow">Panel administrador</div>
+<h1>Inicio</h1>
+<p class="muted">Hola, {{ request.user.username }} · {{ role }}</p>
+
+<div class="stats">
+  {% for key,value in counts.items %}
+  <div><span>{{ key|title }}</span><strong>{{ value }}</strong><div class="mini-bar"><i style="width:{% widthratio value 20 100 %}%"></i></div></div>
+  {% empty %}<div><span>Sin módulos</span><strong>0</strong></div>{% endfor %}
+</div>
+
+<div class="two-col">
+  <div class="panel">
+    <h2>Alertas y pendientes</h2>
+    {% for name,total in alerts %}<p class="alert-line"><span>{{ name }}</span><b>{{ total }}</b></p>{% empty %}<p class="muted">Sin alertas disponibles.</p>{% endfor %}
+  </div>
+  <div class="panel">
+    <h2>Actividad reciente</h2>
+    {% for item in recent %}<p class="activity"><small>{{ item.module }}</small> {{ item.text }}</p>{% empty %}<p class="muted">Sin actividad registrada.</p>{% endfor %}
+  </div>
+</div>
+
+<h2>Accesos rápidos</h2>
+<div class="tiles">
+  {% for slug,title in navigation %}
+  <a class="tile" href="{% url role_ns|add:':module' slug %}"><b>{{ title }}</b><span>Consultar y gestionar →</span></a>
+  {% empty %}<p class="muted">No hay módulos disponibles para tu rol.</p>{% endfor %}
+</div>
+{% endblock %}

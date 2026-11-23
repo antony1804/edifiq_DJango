@@ -1,0 +1,24 @@
+{% load static %}<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Acceso | EDIFIQ</title><link rel="stylesheet" href="{% static 'css/style.css' %}"></head><body class="auth-page">
+  <section class="auth-brand-panel">
+    <a class="auth-brand-logo" href="{% url 'login' %}">Edifi<span>Q</span></a>
+    <div class="auth-brand-copy">
+      <h2>Gestión residencial inteligente y centralizada</h2>
+      <p>Administra personas, apartamentos, visitas, paquetes, reservas y recibos desde una sola plataforma.</p>
+    </div>
+    <div class="auth-brand-stats">
+      <div><strong></strong><small></small></div>
+      <div><strong></strong><small></small></div>
+    </div>
+  </section>
+  <section class="auth-page-right">
+    <div class="auth-form-wrap">
+      <form class="auth-form" method="post">{% csrf_token %}
+        <h2>Iniciar sesión</h2>
+        {% for message in messages %}<div class="auth-error">{{ message }}</div>{% endfor %}
+        <input name="username" placeholder="Usuario" autocomplete="username" required>
+        <input type="password" name="password" placeholder="Contraseña" autocomplete="current-password" required>
+        <button type="submit">Ingresar</button>
+      </form>
+    </div>
+  </section>
+</body></html>

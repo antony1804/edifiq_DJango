@@ -1,0 +1,5 @@
+from django.db import migrations, models
+import django.db.models.deletion
+class Migration(migrations.Migration):
+ dependencies=[('residentes','0002_residente'),('personas','0001_initial')]
+ operations=[migrations.CreateModel(name='Familiar',fields=[('id',models.BigAutoField(auto_created=True,primary_key=True,serialize=False,verbose_name='ID')),('parentesco',models.CharField(choices=[(x,x) for x in ('Padre','Madre','Hijo','Hija','Cónyuge','Hermano','Hermana','Otro')],max_length=20)),('activo',models.BooleanField(default=True)),('creado_en',models.DateTimeField(auto_now_add=True)),('apartamento',models.ForeignKey(on_delete=django.db.models.deletion.PROTECT,related_name='familiares',to='residentes.apartamento')),('persona',models.ForeignKey(on_delete=django.db.models.deletion.PROTECT,related_name='familiares',to='personas.persona')),('responsable',models.ForeignKey(blank=True,null=True,on_delete=django.db.models.deletion.PROTECT,related_name='familiares_autorizados',to='residentes.residente'))],options={'constraints':[models.UniqueConstraint(fields=('persona','apartamento'),name='unico_familiar_apartamento')]})]
