@@ -1,0 +1,61 @@
+﻿<div class="apartamento-ver">
+  <div class="detail-grid">
+    <div><strong>Torre:</strong> {{ apartamento.torre.nombre_torre|default:apartamento.torre }}</div>
+    <div><strong>Número de apartamento:</strong> {{ apartamento.numero_apartamento }}</div>
+    <div><strong>Piso:</strong> {{ apartamento.piso }}</div>
+    <div><strong>Estado (ocupación):</strong> {% if estado_asignacion == 'Asignado' %}<span class="badge ok">Asignado</span>{% else %}<span class="badge muted">No asignado</span>{% endif %}</div>
+    <div><strong>Activo (registro):</strong> {% if apartamento.activo %}Sí{% else %}No{% endif %}</div>
+  </div>
+
+  <h3>Residente(s) del apartamento</h3>
+  {% if residentes_vinculos %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Tipo</th><th>Documento</th><th>Nombre</th><th>Ingreso</th></tr></thead>
+        <tbody>
+          {% for v in residentes_vinculos %}
+            <tr>
+              <td>{{ v.tipo_residente.nombre|default:v.tipo_residente }}</td>
+              <td>{{ v.persona.tipo_documento.abreviatura|default:"" }} {{ v.persona.numero_documento }}</td>
+              <td>{{ v.persona.nombres }} {{ v.persona.apellidos }}</td>
+              <td>{{ v.fecha_ingreso|default:"—" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No hay residente asignado actualmente a este apartamento.</p>
+  {% endif %}
+
+  <h3>Familiares</h3>
+  {% if familiares_vinculos %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Documento</th><th>Nombres</th><th>Apellidos</th><th>Teléfono</th><th>Correo</th><th>Ingreso</th></tr></thead>
+        <tbody>
+          {% for v in familiares_vinculos %}
+            <tr>
+              <td>{{ v.persona.tipo_documento.abreviatura|default:"" }} {{ v.persona.numero_documento }}</td>
+              <td>{{ v.persona.nombres }}</td>
+              <td>{{ v.persona.apellidos }}</td>
+              <td>{{ v.persona.telefono|default:"—" }}</td>
+              <td>{{ v.persona.correo|default:"—" }}</td>
+              <td>{{ v.fecha_ingreso|default:"—" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No hay familiares registrados/vinculados actualmente en este apartamento.</p>
+  {% endif %}
+
+  <div class="actions" style="margin-top:12px;justify-content:flex-end;display:flex;gap:8px;">
+    <button type="button" class="secondary" onclick="document.getElementById('apartamento-ver-modal') && document.getElementById('apartamento-ver-modal').close()">Cerrar</button>
+  </div>
+</div>
+<style>
+  .apartamento-ver .detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 12px;margin-bottom:12px}
+  .apartamento-ver h3{margin:14px 0 8px}
+</style>

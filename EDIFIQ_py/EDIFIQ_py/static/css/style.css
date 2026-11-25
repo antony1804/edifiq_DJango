@@ -161,3 +161,26 @@ input:focus,select:focus,textarea:focus,.field-input:focus{outline:none;border-c
   .two-col{grid-template-columns:1fr}
 }
 @media (max-width:680px){.stats,.tiles{grid-template-columns:1fr}.heading{flex-direction:column;align-items:flex-start}.content{padding:18px 14px}.login-panel,.auth-form{padding:30px 22px}}
+/* Registro (2 pasos) */
+.auth-form-wrap-wide{max-width:520px}
+.auth-form-register h2::after{content:"Completa los pasos para crear tu acceso";display:block;color:#8a94a5;font-size:13px;font-weight:500;letter-spacing:0;margin-top:8px}
+.reg-progress{display:flex;align-items:center;gap:10px;margin:18px 0 8px}
+.reg-step{display:flex;align-items:center;gap:8px;color:#667085;font-weight:600;font-size:13px}
+.reg-step-num{width:28px;height:28px;border-radius:999px;display:inline-grid;place-items:center;background:#e5eaf1;color:#475467;font-weight:800;font-size:13px}
+.reg-step.is-done .reg-step-num,.reg-step.is-current .reg-step-num{background:#2463eb;color:#fff}
+.reg-step.is-current .reg-step-label{color:#172033}
+.reg-progress-line{flex:1;height:4px;border-radius:999px;background:#e5eaf1}
+.reg-progress-line.is-done{background:#2463eb}
+.reg-subtitle{color:#667085;font-size:13px;margin:6px 0 4px;line-height:1.5}
+.reg-fields{display:grid;gap:12px;margin-top:10px}
+.reg-field{display:grid;gap:6px}
+.reg-field label{font-size:13px;font-weight:700;color:#344054}
+.reg-help{color:#667085;font-size:12px}
+.field-error{color:#b42318;font-size:12px;font-weight:600}
+.reg-field.has-error input,.reg-field.has-error select{border-color:#f04438;box-shadow:0 0 0 3px rgba(240,68,56,.10)}
+.reg-actions{display:flex;gap:10px;margin-top:22px;align-items:center}
+.reg-actions button{margin-top:0;flex:1}
+.reg-actions .reg-secondary{flex:0 0 auto;margin-top:0;text-align:center}
+.auth-alt{margin-top:18px;color:#667085;font-size:13px;text-align:center}
+.auth-alt a{color:#2463eb;font-weight:700}
+.auth-alt a:hover{text-decoration:underline}

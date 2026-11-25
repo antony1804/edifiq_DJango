@@ -7,10 +7,6 @@ DEBUG = True
 ALLOWED_HOSTS = ['127.0.0.1', 'localhost', 'testserver']
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'apps.core',
@@ -29,9 +25,10 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'apps.core.schema_auth.SchemaAuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'apps.core.middleware.NoStoreAuthenticatedCacheMiddleware',
 ]
 
 ROOT_URLCONF = 'edifiq.urls'
@@ -41,7 +38,6 @@ TEMPLATES = [{
     'APP_DIRS': True,
     'OPTIONS': {'context_processors': [
         'django.template.context_processors.request',
-        'django.contrib.auth.context_processors.auth',
         'django.contrib.messages.context_processors.messages',
     ]},
 }]
@@ -68,9 +64,10 @@ DATABASES = {
 
 # Las tablas de negocio y esquema mapeadas son managed=False y fuente de verdad externa.
 # Se deshabilitan sus migraciones históricas (stubs no-op) para que migrate/showmigrations
-# no creen ni alteren tablas de negocio. Solo deben migrarse contrib y usuarios.
+# no creen ni alteren tablas de negocio.
 MIGRATION_MODULES = {
     'core': None,
+    'usuarios': None,
     'personas': 'edifiq.test_migrations.personas',
     'residentes': 'edifiq.test_migrations.residentes',
     'visitas': 'edifiq.test_migrations.visitas',
@@ -93,5 +90,9 @@ LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'dashboard'
 LOGOUT_REDIRECT_URL = 'login'
 TEST_RUNNER = 'edifiq.test_runner.SchemaManagedTestRunner'
+
+# Autenticación y sesión basadas solo en tablas originales del esquema (sin auth_user, django_session, usuarios_perfil).
+SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
+MESSAGE_STORAGE = 'django.contrib.messages.storage.cookie.CookieStorage'
 
 

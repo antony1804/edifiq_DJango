@@ -1,15 +1,13 @@
 ﻿from django import forms
-from django.contrib.auth.models import User
 from django.utils import timezone
 
 from apps.core.access import resolve_schema_role
-from apps.core.models import EstadoPaquete, EstadoRecibo, EstadoReserva, EstadoVisita, Rol
+from apps.core.models import EstadoPaquete, EstadoRecibo, EstadoReserva, EstadoUsuario, EstadoVisita, Rol, TipoResidente, Usuario
 from apps.paquetes.models import Paquete
 from apps.personas.models import Persona
 from apps.recibos.models import Recibo
 from apps.reservas.models import Reserva
 from apps.residentes.models import Apartamento, ApartamentoPersona, Torre
-from apps.usuarios.models import Perfil
 from apps.visitas.models import Visita
 
 
@@ -44,12 +42,39 @@ class PersonaForm(StyledForm):
         model = Persona
         fields = ['tipo_documento', 'numero_documento', 'nombres', 'apellidos', 'telefono', 'correo', 'activo']
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if getattr(self.instance, 'pk', None):
+            # Edición (admin/personas): no se permiten cambios en datos sensibles de identidad.
+            for name in ('tipo_documento', 'numero_documento', 'nombres', 'apellidos'):
+                if name in self.fields:
+                    self.fields[name].disabled = True
+                    self.fields[name].required = False
+            self.fields['activo'].label = 'Persona activa'
+
     def clean_numero_documento(self):
         import re
+        if getattr(self.instance, 'pk', None):
+            return self.instance.numero_documento
         val = (self.cleaned_data.get('numero_documento') or '').strip()
         if not re.fullmatch(r'\d{1,10}', val):
             raise forms.ValidationError('Documento: máximo 10 dígitos numéricos.')
         return val
+
+    def clean_tipo_documento(self):
+        if getattr(self.instance, 'pk', None):
+            return self.instance.tipo_documento
+        return self.cleaned_data.get('tipo_documento')
+
+    def clean_nombres(self):
+        if getattr(self.instance, 'pk', None):
+            return self.instance.nombres
+        return (self.cleaned_data.get('nombres') or '').strip()
+
+    def clean_apellidos(self):
+        if getattr(self.instance, 'pk', None):
+            return self.instance.apellidos
+        return (self.cleaned_data.get('apellidos') or '').strip()
 
     def clean_telefono(self):
         import re
@@ -64,12 +89,10 @@ class PersonaForm(StyledForm):
 
     def clean(self):
         data = super().clean()
-        td = data.get('tipo_documento')
-        nd = data.get('numero_documento')
-        if td and nd:
+        td = data.get('tipo_documento') or getattr(self.instance, 'tipo_documento', None)
+        nd = data.get('numero_documento') or getattr(self.instance, 'numero_documento', None)
+        if td and nd and not getattr(self.instance, 'pk', None):
             qs = Persona.objects.filter(tipo_documento=td, numero_documento=nd)
-            if self.instance and getattr(self.instance, 'pk', None):
-                qs = qs.exclude(pk=self.instance.pk)
             if qs.exists():
                 self.add_error('numero_documento', 'Ya existe una persona con ese tipo y número de documento.')
         return data
@@ -98,9 +121,133 @@ class VisitaForm(StyledForm):
 
 
 class PaqueteForm(StyledForm):
+    """Registro/edición de paquetes (admin/vigilante). La recepción se registra con fecha y hora."""
+
     class Meta:
         model = Paquete
-        fields = ['descripcion', 'remitente', 'fecha_recepcion', 'fecha_entrega', 'estado_paquete', 'apartamento', 'persona']
+        fields = ['descripcion', 'remitente', 'apartamento', 'estado_paquete', 'fecha_recepcion']
+        labels = {
+            'descripcion': 'Paquete / descripción',
+            'fecha_recepcion': 'Fecha y hora de recepción',
+            'estado_paquete': 'Estado',
+        }
+
+    def __init__(self, *args, usuario=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.usuario = usuario
+        if 'estado_paquete' in self.fields:
+            self.fields['estado_paquete'].queryset = EstadoPaquete.objects.all().order_by('id_estado_paquete')
+            recibido = EstadoPaquete.objects.filter(nombre__iexact='Recibido').first()
+            if not getattr(self.instance, 'pk', None):
+                # Registrar: siempre se recibe ahora; estado inicial Recibido (pendiente por entregar).
+                if 'fecha_recepcion' in self.fields:
+                    self.fields['fecha_recepcion'].initial = timezone.localtime(timezone.now()).strftime('%Y-%m-%dT%H:%M')
+                    self.fields['fecha_recepcion'].required = True
+                if recibido:
+                    self.fields['estado_paquete'].initial = recibido
+        if 'apartamento' in self.fields:
+            self.fields['apartamento'].queryset = Apartamento.objects.select_related('torre').order_by('torre__nombre_torre', 'numero_apartamento')
+        # En edición no se modifica la recepción original ni el apartamento/estado desde este form básico;
+        # la entrega se gestiona con la acción "Entregar".
+        if getattr(self.instance, 'pk', None):
+            if 'fecha_recepcion' in self.fields:
+                self.fields['fecha_recepcion'].disabled = True
+            if 'estado_paquete' in self.fields:
+                self.fields['estado_paquete'].disabled = True
+
+    def clean(self):
+        data = super().clean()
+        # Asegurar estado Recibido al crear si no se envió.
+        if not getattr(self.instance, 'pk', None) and not data.get('estado_paquete'):
+            recibido = EstadoPaquete.objects.filter(nombre__iexact='Recibido').first()
+            if recibido:
+                data['estado_paquete'] = recibido
+        return data
+
+
+class PaqueteEntregaForm(StyledForm):
+    """Entrega de paquete: persona que recibe (del apartamento), fecha/hora exacta y observación opcional."""
+
+    observacion = forms.CharField(
+        label='Observación (opcional)',
+        required=False,
+        widget=forms.Textarea(attrs={'class': 'field-input', 'rows': 3, 'placeholder': 'Observación de la entrega (si es necesario)'}),
+    )
+
+    class Meta:
+        model = Paquete
+        fields = ['persona', 'fecha_entrega', 'observacion']
+        labels = {
+            'persona': 'Persona que recibe',
+            'fecha_entrega': 'Fecha y hora de entrega',
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        now_local = timezone.localtime(timezone.now())
+        min_dt = now_local.replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:%M')
+        if 'fecha_entrega' in self.fields:
+            self.fields['fecha_entrega'].required = True
+            self.fields['fecha_entrega'].widget.attrs['min'] = min_dt
+            self.fields['fecha_entrega'].widget.attrs['step'] = '60'
+            if not self.initial.get('fecha_entrega') and not getattr(self.instance, 'fecha_entrega', None):
+                self.initial['fecha_entrega'] = now_local.strftime('%Y-%m-%dT%H:%M')
+
+        apt_id = getattr(self.instance, 'apartamento_id', None)
+        persona_ids = []
+        if apt_id:
+            persona_ids = list(
+                ApartamentoPersona.objects.filter(apartamento_id=apt_id, fecha_salida__isnull=True)
+                .values_list('persona_id', flat=True).distinct()
+            )
+        qs = Persona.objects.select_related('tipo_documento').filter(pk__in=persona_ids).order_by('apellidos', 'nombres')
+        if 'persona' in self.fields:
+            self.fields['persona'].queryset = qs
+            self.fields['persona'].required = True
+            self.fields['persona'].label = 'Persona que recibe'
+            self.fields['persona'].empty_label = 'Seleccione la persona que recibe'
+            # incluir persona actual si ya estaba asignada (histórico)
+            if getattr(self.instance, 'persona_id', None) and not qs.filter(pk=self.instance.persona_id).exists():
+                self.fields['persona'].queryset = (Persona.objects.filter(pk=self.instance.persona_id) | qs).distinct()
+
+    def clean_fecha_entrega(self):
+        val = self.cleaned_data.get('fecha_entrega')
+        if not val:
+            return val
+        now_local = timezone.localtime(timezone.now())
+        today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        # comparar en hora local
+        try:
+            val_local = timezone.localtime(val) if timezone.is_aware(val) else val
+        except Exception:
+            val_local = val
+        if val_local < today_start:
+            raise forms.ValidationError('La fecha/hora de entrega no puede ser anterior a hoy.')
+        recep = getattr(self.instance, 'fecha_recepcion', None)
+        if recep:
+            try:
+                r_local = timezone.localtime(recep) if timezone.is_aware(recep) else recep
+                if val_local < r_local:
+                    raise forms.ValidationError('La entrega no puede ser anterior a la recepción del paquete.')
+            except Exception:
+                pass
+        return val
+
+    def save(self, commit=True):
+        obj = super().save(commit=False)
+        obs = (self.cleaned_data.get('observacion') or '').strip()
+        # Sin columna de observación en esquema: se anexa a la descripción si se proporciona.
+        if obs:
+            base = (obj.descripcion or '').strip()
+            marker = f"Observación entrega: {obs}"
+            if marker not in base:
+                obj.descripcion = (base + ("\n" if base else "") + marker).strip()[:200]
+        entregado = EstadoPaquete.objects.filter(nombre__iexact='Entregado').first()
+        if entregado:
+            obj.estado_paquete = entregado
+        if commit:
+            obj.save()
+        return obj
 
 
 class ReciboForm(StyledForm):
@@ -138,55 +285,133 @@ class ReservaForm(StyledForm):
         return data
 
 
+class ApartamentoForm(StyledForm):
+    class Meta:
+        model = Apartamento
+        fields = ['torre', 'numero_apartamento', 'piso', 'activo']
+        labels = {
+            'numero_apartamento': 'Número de apartamento',
+            'activo': 'Activo',
+        }
+
+    def clean_numero_apartamento(self):
+        val = (self.cleaned_data.get('numero_apartamento') or '').strip()
+        if not val:
+            raise forms.ValidationError('Ingresa el número de apartamento.')
+        return val
+
+    def clean(self):
+        data = super().clean()
+        torre = data.get('torre')
+        numero = data.get('numero_apartamento')
+        if torre and numero:
+            qs = Apartamento.objects.filter(torre=torre, numero_apartamento=numero)
+            if self.instance and getattr(self.instance, 'pk', None):
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                self.add_error('numero_apartamento', 'Ya existe un apartamento con ese número en la torre seleccionada.')
+        return data
+
+
 class ApartamentoPersonaForm(StyledForm):
     class Meta:
         model = ApartamentoPersona
         fields = ['apartamento', 'persona', 'tipo_residente', 'fecha_ingreso', 'fecha_salida']
 
+
+class AsignacionResidenteForm(StyledForm):
+    class Meta:
+        model = ApartamentoPersona
+        fields = ['apartamento', 'persona', 'tipo_residente', 'fecha_ingreso', 'fecha_salida']
+        labels = {
+            'fecha_ingreso': 'Fecha de ingreso',
+            'fecha_salida': 'Fecha de salida (opcional)',
+        }
+        widgets = {
+            'fecha_ingreso': forms.DateInput(attrs={'type': 'date'}),
+            'fecha_salida': forms.DateInput(attrs={'type': 'date'}),
+        }
+
     def __init__(self, *args, usuario=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.usuario = usuario
-        _rol, rol_nombre, _slug = resolve_schema_role(usuario) if usuario else (None, None, None)
+
+        self.fields['apartamento'].queryset = Apartamento.objects.select_related('torre').order_by(
+            'torre__nombre_torre', 'numero_apartamento'
+        )
+        self.fields['persona'].queryset = Persona.objects.select_related('tipo_documento').order_by('apellidos', 'nombres')
+        tipos = TipoResidente.objects.filter(
+            nombre__in=['Propietario', 'Arrendatario', 'Familiar']
+        ).order_by('id_tipo_residente')
+        self.fields['tipo_residente'].queryset = tipos if tipos.exists() else TipoResidente.objects.all().order_by('id_tipo_residente')
+        self.fields['fecha_salida'].required = False
+
+        rol_nombre = None
+        if usuario is not None:
+            try:
+                from apps.core.access import resolve_schema_role
+                _rol, rol_nombre, _slug = resolve_schema_role(usuario)
+            except Exception:
+                rol_nombre = getattr(usuario, 'rol_nombre', None)
         if usuario and rol_nombre == 'Residente':
-            from apps.core.access import apartamentos_autorizados
-            ids = apartamentos_autorizados(usuario)
-            self.fields['apartamento'].queryset = Apartamento.objects.filter(pk__in=ids)
-        if getattr(self.instance, 'pk', None):
+            try:
+                from apps.core.access import apartamentos_autorizados
+                ids = apartamentos_autorizados(usuario)
+                self.fields['apartamento'].queryset = Apartamento.objects.filter(pk__in=ids).select_related('torre').order_by(
+                    'torre__nombre_torre', 'numero_apartamento'
+                )
+            except Exception:
+                pass
+
+        if getattr(self.instance, 'apartamento_id', None) and getattr(self.instance, 'persona_id', None):
             self.fields['apartamento'].disabled = True
             self.fields['persona'].disabled = True
 
     def clean(self):
-        d = super().clean()
-        apt = d.get('apartamento')
-        _rol, rol_nombre, _slug = resolve_schema_role(self.usuario) if self.usuario else (None, None, None)
-        if self.usuario and rol_nombre == 'Residente':
-            from apps.core.access import apartamentos_autorizados
-            if apt and apt.pk not in apartamentos_autorizados(self.usuario):
-                self.add_error('apartamento', 'No puedes modificar otro apartamento.')
-        return d
+        data = super().clean()
+        apartamento = data.get('apartamento')
+        persona = data.get('persona')
+        fecha_ingreso = data.get('fecha_ingreso')
+        fecha_salida = data.get('fecha_salida')
+
+        if fecha_ingreso and fecha_salida and fecha_salida < fecha_ingreso:
+            self.add_error('fecha_salida', 'La fecha de salida no puede ser anterior a la fecha de ingreso.')
+
+        if apartamento and persona:
+            qs = ApartamentoPersona.objects.filter(apartamento=apartamento, persona=persona)
+            if getattr(self.instance, 'apartamento_id', None) and getattr(self.instance, 'persona_id', None):
+                qs = qs.exclude(apartamento_id=self.instance.apartamento_id, persona_id=self.instance.persona_id)
+            if qs.exists():
+                self.add_error(None, 'Ya existe una asignación para esta persona en el apartamento seleccionado.')
+
+        rol_nombre = None
+        if getattr(self, 'usuario', None) is not None:
+            try:
+                from apps.core.access import resolve_schema_role, apartamentos_autorizados
+                _rol, rol_nombre, _slug = resolve_schema_role(self.usuario)
+                if rol_nombre == 'Residente' and apartamento and apartamento.pk not in apartamentos_autorizados(self.usuario):
+                    self.add_error('apartamento', 'No puedes modificar otro apartamento.')
+            except Exception:
+                pass
+
+        return data
 
 
 class PerfilForm(StyledForm):
-    class Meta:
-        model = Perfil
-        fields = ['usuario', 'rol', 'apartamento']
-
-    def clean(self):
-        d = super().clean()
-        if d.get('rol') == 'Residente' and not d.get('apartamento'):
-            self.add_error('apartamento', 'Asigna un apartamento al residente.')
-        return d
+    """Obsoleto: la aplicación usa la tabla original `usuario` (sin Perfil)."""
+    pass
 
 
 def form_for(model):
     special = {
         Persona: PersonaForm,
+        Apartamento: ApartamentoForm,
         ApartamentoPersona: ApartamentoPersonaForm,
         Reserva: ReservaForm,
         Visita: VisitaForm,
         Paquete: PaqueteForm,
         Recibo: ReciboForm,
-        Perfil: PerfilForm,
+        Usuario: UsuarioForm,
     }
     if model in special:
         return special[model]
@@ -207,59 +432,83 @@ class PersonaSelect(forms.Select):
         return option
 
 
-class UsuarioForm(forms.ModelForm):
-    """Alta y edición de cuentas; nunca se almacena una clave sin hash."""
+class UsuarioForm(StyledForm):
+    """Alta y edición de cuentas usando la tabla original `usuario` (sin auth_user/Perfil)."""
     password1 = forms.CharField(label='Contraseña', widget=forms.PasswordInput(attrs={'class': 'field-input'}), required=False)
     password2 = forms.CharField(label='Confirmar contraseña', widget=forms.PasswordInput(attrs={'class': 'field-input'}), required=False)
-    persona = forms.ModelChoiceField(label='Persona registrada', queryset=Persona.objects.none(), required=True, empty_label='Seleccione una persona registrada', widget=PersonaSelect)
-    rol = forms.ChoiceField(label='Rol', choices=[])
-    apartamento = forms.ModelChoiceField(label='Apartamento', queryset=Apartamento.objects.all(), required=False)
 
     class Meta:
-        model = User
-        fields = ['username', 'first_name', 'last_name', 'email', 'is_active']
+        model = Usuario
+        fields = ['username', 'password', 'estado_usuario', 'persona', 'rol']
+        widgets = {
+            'password': forms.HiddenInput(),
+        }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        try:
-            self.fields['rol'].choices = [(r.nombre, r.nombre) for r in Rol.objects.all().order_by('id_rol')]
-        except Exception:
-            self.fields['rol'].choices = list(Perfil.ROLES)
-        for field in self.fields.values():
-            field.widget.attrs.setdefault('class', 'field-input')
-        for name in ('first_name', 'last_name', 'email'):
-            self.fields[name].disabled = True
-            self.fields[name].help_text = 'Se obtiene de la persona registrada.'
-        used = Perfil.objects.exclude(usuario_id=self.instance.pk).exclude(persona__isnull=True).values_list('persona_id', flat=True)
-        self.fields['persona'].queryset = Persona.objects.filter(activo=True).exclude(pk__in=used).order_by('apellidos', 'nombres')
+        self.fields['password'].required = False
+        if 'persona' in self.fields:
+            used = Usuario.objects.exclude(pk=getattr(self.instance, 'pk', None)).values_list('persona_id', flat=True)
+            qs = Persona.objects.filter(activo=True).exclude(pk__in=used).order_by('apellidos', 'nombres')
+            if self.instance and getattr(self.instance, 'persona_id', None):
+                qs = (Persona.objects.filter(pk=self.instance.persona_id) | qs).distinct()
+            self.fields['persona'].queryset = qs
+            self.fields['persona'].widget = PersonaSelect(attrs={'class': 'field-input'})
+            self.fields['persona'].label = 'Persona registrada'
+            self.fields['persona'].empty_label = 'Seleccione una persona registrada'
+        if 'rol' in self.fields:
+            self.fields['rol'].queryset = Rol.objects.all().order_by('id_rol')
+        if 'estado_usuario' in self.fields:
+            self.fields['estado_usuario'].queryset = EstadoUsuario.objects.all().order_by('id_estado_usuario')
+            activo = EstadoUsuario.objects.filter(nombre__iexact='Activo').first() or EstadoUsuario.objects.first()
+            if not self.instance.pk and activo:
+                self.fields['estado_usuario'].initial = activo
         if self.instance.pk:
-            perfil = Perfil.objects.filter(usuario_id=self.instance.pk).first()
-            if perfil:
-                self.fields['persona'].initial = perfil.persona
-                self.fields['rol'].initial = perfil.rol
-                self.fields['apartamento'].initial = perfil.apartamento
+            self.fields['password1'].help_text = 'Déjalo en blanco para conservar la contraseña actual.'
         else:
             self.fields['password1'].required = True
             self.fields['password2'].required = True
-            self.fields['is_active'].initial = True
+
+    def clean_username(self):
+        username = (self.cleaned_data.get('username') or '').strip()
+        if not username:
+            raise forms.ValidationError('Ingresa un nombre de usuario.')
+        qs = Usuario.objects.filter(username__iexact=username)
+        if self.instance and getattr(self.instance, 'pk', None):
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise forms.ValidationError('Este nombre de usuario ya está en uso.')
+        return username
 
     def clean(self):
         data = super().clean()
         p1, p2 = data.get('password1'), data.get('password2')
         if p1 != p2:
             self.add_error('password2', 'Las contraseñas no coinciden.')
-        if p1:
+        if not self.instance.pk and not p1:
+            self.add_error('password1', 'La contraseña es obligatoria.')
+        if p1 and not self.errors.get('password1'):
             from django.contrib.auth.password_validation import validate_password
             try:
-                validate_password(p1, self.instance if self.instance.pk else None)
+                validate_password(p1)
             except forms.ValidationError as error:
                 self.add_error('password1', error)
         persona = data.get('persona')
         if persona:
-            linked = Perfil.objects.filter(persona=persona).exclude(usuario_id=self.instance.pk).exists()
+            linked = Usuario.objects.filter(persona=persona).exclude(pk=getattr(self.instance, 'pk', None)).exists()
             if linked:
                 self.add_error('persona', 'Esta persona ya tiene un usuario asignado.')
         return data
+
+    def save(self, commit=True):
+        from apps.core.schema_auth import set_schema_password
+        obj = super().save(commit=False)
+        p1 = self.cleaned_data.get('password1')
+        if p1:
+            obj.password = set_schema_password(p1)
+        if commit:
+            obj.save()
+        return obj
 
 
 class TorreMasivaForm(forms.Form):

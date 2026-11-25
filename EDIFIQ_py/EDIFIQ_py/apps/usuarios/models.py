@@ -1,12 +1,18 @@
 ﻿from django.db import models
-from django.conf import settings
+
 
 class Perfil(models.Model):
+    """Obsoleto: la autenticación usa la tabla original `usuario` (sin Django auth ni `usuarios_perfil`)."""
     ROLES = [('Administrador', 'Administrador'), ('Residente', 'Residente'), ('Vigilante', 'Vigilante')]
-    usuario = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    persona = models.OneToOneField('personas.Persona', null=True, blank=True, on_delete=models.PROTECT, db_constraint=False, related_name='perfil_usuario')
-    rol = models.CharField(max_length=20, choices=ROLES, default='Residente')
-    apartamento = models.ForeignKey('residentes.Apartamento', null=True, blank=True, on_delete=models.SET_NULL, db_constraint=False)
+    id = models.BigAutoField(primary_key=True)
+    usuario_id = models.IntegerField(null=True, blank=True)
+    persona_id = models.IntegerField(null=True, blank=True)
+    rol = models.CharField(max_length=20, null=True, blank=True)
+    apartamento_id = models.IntegerField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = 'usuarios_perfil'
 
     def __str__(self):
-        return f'{self.usuario.username} ({self.rol})'
+        return f'Perfil obsoleto ({self.pk})'

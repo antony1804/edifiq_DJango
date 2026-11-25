@@ -1,0 +1,91 @@
+﻿{% extends 'base.html' %}
+{% block content %}
+<div class="eyebrow">Mi espacio</div>
+<div class="heading">
+  <div>
+    <h1>{{ title }}</h1>
+    <p class="muted">Información de tu apartamento registrada en el sistema</p>
+  </div>
+</div>
+
+{% if vinculos %}
+  <div class="apartment-sections">
+    {% for v in vinculos %}
+      <div class="panel">
+        <h2 style="margin:0 0 12px">Apartamento {{ v.apartamento.numero_apartamento }}</h2>
+        <ul class="detail-items" style="margin:0;padding-left:18px;line-height:1.9">
+          <li><strong>Torre:</strong> {{ v.apartamento.torre.nombre_torre }}</li>
+          <li><strong>Piso:</strong> {{ v.apartamento.piso }}</li>
+          <li><strong>Número de apartamento:</strong> {{ v.apartamento.numero_apartamento }}</li>
+          <li><strong>Estado del apartamento:</strong> {% if v.apartamento.activo %}Activo{% else %}Inactivo{% endif %}</li>
+          <li><strong>Tipo de residente:</strong> {{ v.tipo_residente.nombre }}</li>
+          <li><strong>Fecha de ingreso (asignación):</strong> {{ v.fecha_ingreso|date:"d/m/Y" }}</li>
+        </ul>
+      </div>
+    {% endfor %}
+  </div>
+
+  <div class="panel" style="margin-top:18px">
+    <div class="heading" style="margin-bottom:12px">
+      <div>
+        <h2 style="margin:0">Mis familiares</h2>
+        <p class="muted" style="margin:4px 0 0">Familiares registrados en tu apartamento</p>
+      </div>
+    </div>
+    <form class="filters" method="get" style="margin-bottom:14px">
+      <input name="qf" value="{{ qf }}" placeholder="Buscar familiar (documento, nombre, teléfono, correo)..." aria-label="Buscar familiar">
+      <button class="primary" type="submit">Buscar</button>
+      <a class="secondary linkbutton" href="{% url role_ns|add:':module' 'apartamentos' %}">Limpiar</a>
+    </form>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Número de documento</th>
+            <th>Nombres</th>
+            <th>Apellidos</th>
+            <th>Teléfono</th>
+            <th>Correo</th>
+            <th>Ingreso</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in familiares %}
+            <tr>
+              <td>{{ f.persona.numero_documento|default:"-" }}</td>
+              <td>{{ f.persona.nombres|default:"-" }}</td>
+              <td>{{ f.persona.apellidos|default:"-" }}</td>
+              <td>{{ f.persona.telefono|default:"-" }}</td>
+              <td>{{ f.persona.correo|default:"-" }}</td>
+              <td>{{ f.fecha_ingreso|date:"d/m/Y" }}</td>
+              <td>
+                {% if can_edit_familiar %}
+                  <a class="textlink" href="{% url role_ns|add:':edit' 'residentes' f.row_key %}">Editar</a>
+                {% endif %}
+                {% if can_delete_familiar %}
+                  <form class="inline" action="{% url role_ns|add:':delete' 'residentes' f.row_key %}" method="post" onsubmit="return confirm('¿Está seguro de eliminar este familiar? Esta acción no se puede deshacer.');">
+                    {% csrf_token %}
+                    <button class="danger-link" type="submit">Eliminar</button>
+                  </form>
+                {% endif %}
+                {% if not can_edit_familiar and not can_delete_familiar %}
+                  <span class="muted">Consulta</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="7" class="empty">Aún no tienes familiares registrados</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% else %}
+  <div class="panel">
+    <p class="muted" style="margin:0;font-size:16px">No asignado</p>
+  </div>
+{% endif %}
+{% endblock %}

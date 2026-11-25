@@ -1,0 +1,63 @@
+{% load static %}<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Registro | EDIFIQ</title><link rel="stylesheet" href="{% static 'css/style.css' %}"></head><body class="auth-page">
+  <section class="auth-brand-panel">
+    <a class="auth-brand-logo" href="{% url 'login' %}">Edifi<span>Q</span></a>
+    <div class="auth-brand-copy">
+      <h2>Crea tu acceso a la plataforma</h2>
+      <p>Primero ingresa y valida tus datos como persona y luego crea tu cuenta. La persona se registrará al finalizar el proceso.</p>
+    </div>
+    <div class="auth-brand-stats">
+      <div><strong>Paso {{ step }}</strong><small>de 2</small></div>
+      <div><strong>{% if step == 1 %}Persona{% else %}Cuenta{% endif %}</strong><small>en progreso</small></div>
+    </div>
+  </section>
+  <section class="auth-page-right">
+    <div class="auth-form-wrap auth-form-wrap-wide">
+      <form class="auth-form auth-form-register" method="post" novalidate>{% csrf_token %}
+        <h2>Registro</h2>
+
+        <div class="reg-progress" aria-label="Progreso de registro">
+          <div class="reg-step {% if step >= 1 %}is-done{% endif %} {% if step == 1 %}is-current{% endif %}">
+            <span class="reg-step-num">1</span>
+            <span class="reg-step-label">Datos de persona</span>
+          </div>
+          <div class="reg-progress-line {% if step >= 2 %}is-done{% endif %}"></div>
+          <div class="reg-step {% if step >= 2 %}is-done is-current{% endif %}">
+            <span class="reg-step-num">2</span>
+            <span class="reg-step-label">Crear cuenta</span>
+          </div>
+        </div>
+
+        {% if step == 1 %}
+          <p class="reg-subtitle">Paso 1: ingresa los datos de la persona y valida la información.</strong></p>
+        {% else %}
+          <p class="reg-subtitle">Paso 2: crea tu cuenta de acceso como <strong>Residente</strong> para <strong>{{ persona.nombres }} {{ persona.apellidos }}</strong>.</p>
+        {% endif %}
+
+        {% for message in messages %}<div class="auth-error">{{ message }}</div>{% endfor %}
+        {% if form.non_field_errors %}<div class="auth-error">{{ form.non_field_errors|striptags }}</div>{% endif %}
+
+        <div class="reg-fields">
+          {% for field in form %}
+            <div class="reg-field {% if field.errors %}has-error{% endif %}">
+              <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}<small class="reg-help">{{ field.help_text }}</small>{% endif %}
+              {% for error in field.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+
+        <div class="reg-actions">
+          {% if step == 2 %}
+            <a class="secondary reg-secondary" href="{% url 'registro' %}?paso=1">Volver</a>
+            <button type="submit" name="action" value="crear_cuenta">Registrarse</button>
+          {% else %}
+            <button type="submit" name="action" value="guardar_persona">Continuar</button>
+          {% endif %}
+        </div>
+
+        <p class="auth-alt">¿Ya tienes cuenta? <a href="{% url 'login' %}">Inicia sesión</a></p>
+      </form>
+    </div>
+  </section>
+</body></html>

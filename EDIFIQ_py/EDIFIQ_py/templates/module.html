@@ -1,1 +1,754 @@
-﻿{% extends 'base.html' %}{% block content %}<div class="eyebrow">MÓDULOS / CONSULTA</div><div class="heading"><div><h1>{{ title }}</h1><p class="muted">Consulta, filtros y gestión de registros</p></div><div class="heading-actions">{% if can_report %}<a class="secondary linkbutton" href="{% url role_ns|add:':reporte_pdf' slug %}?{{ request.GET.urlencode }}">Descargar PDF</a>{% endif %}{% if can_bulk %}<a class="secondary linkbutton" href="{% url role_ns|add:':torre_masiva' %}">Crear torre masiva</a>{% endif %}{% if can_create %}<a class="primary linkbutton" href="{% url role_ns|add:':create' slug %}{% if active_relations %}?{% for key,value in active_relations.items %}{{ key }}={{ value }}{% if not forloop.last %}&amp;{% endif %}{% endfor %}{% endif %}">+ Registrar</a>{% endif %}</div></div><div class="panel"><form class="filters" method="get"><input name="q" value="{{ q }}" placeholder="Buscar registros..." aria-label="Buscar">{% if states %}<select name="estado" aria-label="Estado"><option value="">Todos los estados</option>{% for value,label in states %}<option value="{{ value }}" {% if estado == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>{% endif %}<button class="primary">Filtrar</button><a class="secondary linkbutton" href="{% url role_ns|add:':module' slug %}">Limpiar</a>{% for key,value in active_relations.items %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}</form><div class="table-wrap"><table><thead><tr><th>ID</th><th>Registro</th><th>Acciones</th></tr></thead><tbody>{% if slug == 'residentes' %}{% for group in resident_groups %}<tr><td>#{{ group.persona.pk }}</td><td><strong>{{ group.persona }}</strong><div class="muted small">{{ group.types_label }}</div><div class="related-links">{% for relation in group.relations %}<a href="{% url role_ns|add:':apartamento_detalle' relation.apartamento.pk %}">{{ relation.apartamento }} · {{ relation.display_tipo }}{% if not relation.display_activo %} (Histórico){% endif %} ↗</a>{% endfor %}</div></td><td><a class="textlink" href="{% url role_ns|add:':module' 'personas' %}?pk={{ group.persona.pk }}">Ver persona</a>{% if can_edit %}<div class="related-links">{% for relation in group.relations %}<a href="{% url role_ns|add:':edit' 'residentes' relation.row_key %}">Editar {{ relation.apartamento }}</a>{% endfor %}</div>{% endif %}</td></tr>{% empty %}<tr><td colspan="3" class="empty">No hay registros para mostrar</td></tr>{% endfor %}{% else %}{% for row in rows %}{% with item=row.item %}<tr><td>#{{ row.key }}</td><td><strong>{% if slug == 'apartamentos' %}<a class="textlink" href="{% url role_ns|add:':apartamento_detalle' item.pk %}">{{ item }}</a>{% else %}{{ item }}{% endif %}</strong>{% if slug == 'apartamentos' %}<div><a class="textlink" href="{% url role_ns|add:':apartamento_detalle' item.pk %}">Ver ficha completa del apartamento</a></div>{% endif %}{% if slug == "usuarios" %}<div class="muted small">Rol: {{ item.perfil.rol|default:"Sin asignar" }} · {{ item.email|default:"Sin correo" }}</div>{% endif %}{% if row.links %}<div class="related-links">{% for link in row.links %}<a href="{{ link.url }}">{{ link.label }} ↗</a>{% endfor %}</div>{% endif %}</td><td>{% if can_edit %}<a class="textlink" href="{% url role_ns|add:':edit' slug row.key %}">Editar</a>{% endif %}{% if can_delete %}<form class="inline" action="{% url role_ns|add:':delete' slug row.key %}" method="post" onsubmit="return confirm('¿Eliminar este registro?');">{% csrf_token %}<button class="danger-link">Eliminar</button></form>{% endif %}{% if not can_edit and not can_delete %}<span class="muted">Consulta</span>{% endif %}</td></tr>{% endwith %}{% empty %}<tr><td colspan="3" class="empty">No hay registros para mostrar</td></tr>{% endfor %}{% endif %}</tbody></table></div><p class="muted small">{% if slug == "residentes" %}Se muestran hasta 100 personas distintas con sus vínculos (apartamento_persona).{% else %}Se muestran hasta 100 registros. Utiliza los filtros para acotar la búsqueda.{% endif %}</p></div>{% endblock %}
+﻿{% extends 'base.html' %}{% block content %}
+<div class="eyebrow">MÓDULOS / CONSULTA</div>
+<div class="heading">
+  <div>
+    <h1>{{ title }}</h1>
+    <p class="muted">Consulta, filtros y gestión de registros</p>
+  </div>
+  <div class="heading-actions">
+    {% if can_report %}<a class="secondary linkbutton" href="{% url role_ns|add:':reporte_pdf' slug %}?{{ request.GET.urlencode }}">Descargar PDF</a>{% endif %}
+    {% if slug == 'torres' %}
+      {% if can_bulk %}<button type="button" class="primary linkbutton js-open-torre-modal" data-modal-title="Registrar torre" data-modal-url="{% url role_ns|add:':torre_masiva' %}?modal=1">+ Registrar torre</button>{% endif %}
+    {% elif slug == 'apartamentos' %}
+      {% if can_create %}<button type="button" class="primary linkbutton js-open-apartamento-form" data-modal-title="Registrar apartamento" data-modal-url="{% url role_ns|add:':create' 'apartamentos' %}?modal=1">+ Registrar apartamento</button>{% endif %}
+    {% elif slug == 'residentes_apartamentos' %}
+      {% if can_create %}<button type="button" class="primary linkbutton js-open-asignacion-form" data-modal-title="Nueva asignación" data-modal-url="{% url role_ns|add:':create' 'residentes_apartamentos' %}?modal=1">Nueva asignación</button>{% endif %}
+    {% elif slug == 'paquetes' %}
+      {% if can_create %}<button type="button" class="primary linkbutton js-open-paquete-form" data-modal-title="Registrar paquete" data-modal-url="{% url role_ns|add:':create' 'paquetes' %}?modal=1">+ Registrar paquete</button>{% endif %}
+    {% else %}
+      {% if can_bulk %}<a class="secondary linkbutton" href="{% url role_ns|add:':torre_masiva' %}">Crear torre masiva</a>{% endif %}
+      {% if can_create %}<a class="primary linkbutton" href="{% url role_ns|add:':create' slug %}{% if active_relations %}?{% for key,value in active_relations.items %}{{ key }}={{ value }}{% if not forloop.last %}&amp;{% endif %}{% endfor %}{% endif %}">+ Registrar</a>{% endif %}
+    {% endif %}
+  </div>
+</div>
+<div class="panel">
+  <form class="filters" method="get">
+    <input name="q" value="{{ q }}" placeholder="Buscar registros..." aria-label="Buscar">
+    {% if slug == 'personas' %}
+      <select name="tipo_documento" aria-label="Tipo de documento">
+        <option value="">Todos los tipos de documento</option>
+        {% for td in persona_tipo_documentos %}
+          <option value="{{ td.pk }}" {% if persona_tipo_documento == td.pk|stringformat:"s" %}selected{% endif %}>{{ td.abreviatura }} - {{ td.nombre }}</option>
+        {% endfor %}
+      </select>
+      <select name="estado_persona" aria-label="Estado">
+        <option value="">Todos los estados</option>
+        {% for value,label in persona_estado_choices %}
+          <option value="{{ value }}" {% if persona_estado == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    {% elif slug == 'apartamentos' %}
+      <select name="torre" aria-label="Torre">
+        <option value="">Todas las torres</option>
+        {% for t in apartamento_torres %}
+          <option value="{{ t.pk }}" {% if apartamento_torre == t.pk|stringformat:"s" %}selected{% endif %}>{{ t.nombre_torre }}</option>
+        {% endfor %}
+      </select>
+      <select name="estado_apartamento" aria-label="Estado">
+        <option value="">Todos los estados</option>
+        {% for value,label in apartamento_estado_choices %}
+          <option value="{{ value }}" {% if apartamento_estado == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    {% elif slug == 'residentes_apartamentos' %}
+      <select name="asignacion_torre" aria-label="Torre">
+        <option value="">Todas las torres</option>
+        {% for t in asignacion_torres %}
+          <option value="{{ t.pk }}" {% if asignacion_torre == t.pk|stringformat:"s" %}selected{% endif %}>{{ t.nombre_torre }}</option>
+        {% endfor %}
+      </select>
+      <select name="tipo_residente" aria-label="Tipo de residente">
+        <option value="">Todos los tipos</option>
+        {% for tr in asignacion_tipos %}
+          <option value="{{ tr.pk }}" {% if asignacion_tipo == tr.pk|stringformat:"s" %}selected{% endif %}>{{ tr.nombre }}</option>
+        {% endfor %}
+      </select>
+      <select name="estado_asignacion_residente" aria-label="Estado en apartamento">
+        <option value="">Todos los estados</option>
+        {% for value,label in asignacion_estado_choices %}
+          <option value="{{ value }}" {% if asignacion_estado == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    {% elif slug == 'paquetes' %}
+      <select name="paquete_estado" aria-label="Estado">
+        <option value="">Todos los estados</option>
+        {% for value,label in paquete_estado_choices %}
+          <option value="{{ value }}" {% if paquete_estado == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <select name="paquete_torre" aria-label="Torre">
+        <option value="">Todas las torres</option>
+        {% for t in paquete_torres %}
+          <option value="{{ t.pk }}" {% if paquete_torre == t.pk|stringformat:"s" %}selected{% endif %}>{{ t.nombre_torre }}</option>
+        {% endfor %}
+      </select>
+      <label class="date-filter"><span>Recibido desde</span><input type="date" name="recibido_desde" value="{{ recibido_desde }}"></label>
+      <label class="date-filter"><span>Recibido hasta</span><input type="date" name="recibido_hasta" value="{{ recibido_hasta }}"></label>
+    {% elif states %}
+      <select name="estado" aria-label="Estado">
+        <option value="">Todos los estados</option>
+        {% for value,label in states %}
+          <option value="{{ value }}" {% if estado == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    {% endif %}
+    <button class="primary">Filtrar</button>
+    <a class="secondary linkbutton" href="{% url role_ns|add:':module' slug %}">Limpiar</a>
+    {% for key,value in active_relations.items %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+  </form>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          {% if slug == 'personas' %}
+            <th>ID</th>
+            <th>Tipo documento</th>
+            <th>Número documento</th>
+            <th>Nombres</th>
+            <th>Apellidos</th>
+            <th>Teléfono</th>
+            <th>Correo</th>
+            <th>Estado</th>
+            <th>Acciones</th>
+          {% elif slug == 'apartamentos' %}
+            <th>ID</th>
+            <th>Número de apartamento</th>
+            <th>Torre</th>
+            <th>Piso</th>
+            <th>Estado</th>
+            <th>Acciones</th>
+          {% elif slug == 'residentes_apartamentos' %}
+            <th>Apartamento</th>
+            <th>Tipo documento</th>
+            <th>Número documento</th>
+            <th>Persona</th>
+            <th>Tipo residente</th>
+            <th>Fecha de ingreso</th>
+            <th>Fecha de salida</th>
+            <th>Estado</th>
+            <th>Acciones</th>
+          {% elif slug == 'paquetes' %}
+            {% if can_edit or can_delete or can_create %}
+              <th>Paquete</th>
+              <th>Remitente</th>
+              <th>Apartamento</th>
+              <th>Fecha de recibido</th>
+              <th>Entregado</th>
+              <th>Estado</th>
+              <th>Acciones</th>
+            {% else %}
+              <th>Descripción</th>
+              <th>Remitente</th>
+              <th>Recepción</th>
+              <th>Entrega</th>
+              <th>Estado</th>
+            {% endif %}
+          {% else %}
+            <th>ID</th>
+            <th>Registro</th>
+            <th>Acciones</th>
+          {% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% if slug == 'residentes' %}
+          {% for group in resident_groups %}
+            <tr>
+              <td>#{{ group.persona.pk }}</td>
+              <td>
+                <strong>{{ group.persona }}</strong>
+                <div class="muted small">{{ group.types_label }}</div>
+                <div class="related-links">
+                  {% for relation in group.relations %}
+                    <a href="{% url role_ns|add:':apartamento_detalle' relation.apartamento.pk %}">{{ relation.apartamento }} · {{ relation.display_tipo }}{% if not relation.display_activo %} (Histórico){% endif %} ↗</a>
+                  {% endfor %}
+                </div>
+              </td>
+              <td>
+                <a class="textlink" href="{% url role_ns|add:':module' 'personas' %}?pk={{ group.persona.pk }}">Ver persona</a>
+                {% if can_edit %}
+                  <div class="related-links">
+                    {% for relation in group.relations %}
+                      <a href="{% url role_ns|add:':edit' 'residentes' relation.row_key %}">Editar {{ relation.apartamento }}</a>
+                    {% endfor %}
+                  </div>
+                {% endif %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="3" class="empty">No hay registros para mostrar</td></tr>
+          {% endfor %}
+        {% elif slug == 'personas' %}
+          {% for row in rows %}
+            {% with item=row.item %}
+              <tr>
+                <td>{{ item.id_persona }}</td>
+                <td>{{ item.tipo_documento.abreviatura|default:item.tipo_documento.nombre|default:item.tipo_documento }}</td>
+                <td>{{ item.numero_documento }}</td>
+                <td>{{ item.nombres }}</td>
+                <td>{{ item.apellidos }}</td>
+                <td>{{ item.telefono|default:"—" }}</td>
+                <td>{{ item.correo|default:"—" }}</td>
+                <td>{% if item.activo %}<span class="badge ok">Activo</span>{% else %}<span class="badge muted">Inactivo</span>{% endif %}</td>
+                <td>
+                  {% if can_edit %}
+                    <div class="row-actions">
+                      <button type="button" class="textlink js-edit-persona" data-edit-url="{% url role_ns|add:':edit' 'personas' row.key %}?modal=1">Editar</button>
+                      <form class="inline" action="{% url role_ns|add:':toggle_estado' 'personas' row.key %}" method="post" onsubmit="return confirm('{% if item.activo %}¿Desactivar esta persona? Podrá reactivarse luego, pero quedará inactiva en el sistema.{% else %}¿Activar esta persona?{% endif %}');">
+                        {% csrf_token %}
+                        <button type="submit" class="{% if item.activo %}danger-link{% else %}textlink{% endif %}">{% if item.activo %}Desactivar{% else %}Activar{% endif %}</button>
+                      </form>
+                    </div>
+                  {% else %}
+                    <span class="muted">Consulta</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endwith %}
+          {% empty %}
+            <tr><td colspan="9" class="empty">No hay personas para mostrar</td></tr>
+          {% endfor %}
+        {% elif slug == 'apartamentos' %}
+          {% for row in rows %}
+            {% with item=row.item %}
+              <tr>
+                <td>{{ item.pk }}</td>
+                <td>{{ item.numero_apartamento }}</td>
+                <td>{{ item.torre.nombre_torre|default:item.torre }}</td>
+                <td>{{ item.piso }}</td>
+                <td>{% if item.estado_asignacion == 'Asignado' %}<span class="badge ok">Asignado</span>{% else %}<span class="badge muted">No asignado</span>{% endif %}</td>
+                <td>
+                  <div class="row-actions">
+                    <button type="button" class="textlink js-open-apartamento-ver" data-ver-url="{% url role_ns|add:':apartamento_ver_modal' item.pk %}">Ver</button>
+                    {% if can_edit %}
+                      <button type="button" class="textlink js-open-apartamento-form" data-modal-title="Editar apartamento" data-modal-url="{% url role_ns|add:':edit' 'apartamentos' row.key %}?modal=1">Editar</button>
+                    {% endif %}
+                    {% if can_delete %}
+                      <form class="inline" action="{% url role_ns|add:':delete' 'apartamentos' row.key %}" method="post" onsubmit="return confirm('¿Eliminar este apartamento? Esta acción no se puede deshacer.');">
+                        {% csrf_token %}
+                        <button class="danger-link">Eliminar</button>
+                      </form>
+                    {% endif %}
+                    {% if not can_edit and not can_delete %}<span class="muted">Solo consulta</span>{% endif %}
+                  </div>
+                </td>
+              </tr>
+            {% endwith %}
+          {% empty %}
+            <tr><td colspan="6" class="empty">No hay apartamentos para mostrar</td></tr>
+          {% endfor %}
+        {% elif slug == 'residentes_apartamentos' %}
+          {% for row in rows %}
+            {% with item=row.item %}
+              <tr>
+                <td><strong>{{ item.apartamento.torre.nombre_torre|default:item.apartamento.torre }} - {{ item.apartamento.numero_apartamento }}</strong></td>
+                <td>{{ item.persona.tipo_documento.abreviatura|default:item.persona.tipo_documento|default:"—" }}</td>
+                <td>{{ item.persona.numero_documento|default:"—" }}</td>
+                <td>{{ item.persona.nombres }} {{ item.persona.apellidos }}</td>
+                <td>{{ item.tipo_residente.nombre|default:item.tipo_residente }}</td>
+                <td>{{ item.fecha_ingreso|default:"—" }}</td>
+                <td>{{ item.fecha_salida|default:"—" }}</td>
+                <td>{% if not item.fecha_salida %}<span class="badge ok">Activo</span>{% else %}<span class="badge muted">Con salida</span>{% endif %}</td>
+                <td>
+                  <div class="row-actions">
+                    {% if can_edit %}
+                      {% if not item.fecha_salida %}
+                        <form class="inline" action="{% url role_ns|add:':asignacion_salida' 'residentes_apartamentos' row.key %}" method="post" onsubmit="return confirm('¿Registrar la salida de esta persona del apartamento? Se guardará la fecha de salida y la asignación quedará inactiva.');">
+                          {% csrf_token %}
+                          <button type="submit" class="textlink">Salida</button>
+                        </form>
+                      {% else %}
+                        <form class="inline" action="{% url role_ns|add:':asignacion_reasignar' 'residentes_apartamentos' row.key %}" method="post" onsubmit="return confirm('¿Reasignar esta persona al apartamento? Se reactivará la asignación.');">
+                          {% csrf_token %}
+                          <button type="submit" class="textlink">Reasignar</button>
+                        </form>
+                      {% endif %}
+                    {% endif %}
+                    {% if can_delete %}
+                      <form class="inline" action="{% url role_ns|add:':delete' 'residentes_apartamentos' row.key %}" method="post" onsubmit="return confirm('¿Eliminar esta asignación por completo? Esta acción no se puede deshacer.');">
+                        {% csrf_token %}
+                        <button type="submit" class="danger-link">Eliminar</button>
+                      </form>
+                    {% endif %}
+                    {% if not can_edit and not can_delete %}<span class="muted">Consulta</span>{% endif %}
+                  </div>
+                </td>
+              </tr>
+            {% endwith %}
+          {% empty %}
+            <tr><td colspan="9" class="empty">No hay asignaciones para mostrar</td></tr>
+          {% endfor %}
+        {% elif slug == 'paquetes' %}
+          {% for row in rows %}
+            {% with item=row.item %}
+              {% if can_edit or can_delete or can_create %}
+                <tr>
+                  <td><strong>{{ item.descripcion }}</strong></td>
+                  <td>{{ item.remitente }}</td>
+                  <td>{{ item.apartamento.torre.nombre_torre|default:item.apartamento.torre }} - {{ item.apartamento.numero_apartamento }}</td>
+                  <td>{{ item.fecha_recepcion|date:"Y-m-d H:i" }}</td>
+                  <td>{% if item.fecha_entrega %}{{ item.fecha_entrega|date:"Y-m-d H:i" }}{% else %}<span class="muted">Todavía no ha sido entregado</span>{% endif %}</td>
+                  <td>
+                    {% if item.estado_paquete.nombre == 'Entregado' %}
+                      <span class="badge ok">Entregado</span>
+                    {% else %}
+                      <span class="badge muted">Pendiente por entregar</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    <div class="row-actions">
+                      {% if item.estado_paquete.nombre != 'Entregado' and can_edit %}
+                        <button type="button" class="textlink js-open-paquete-entregar" data-modal-title="Entregar paquete" data-modal-url="{% url role_ns|add:':paquete_entregar' 'paquetes' row.key %}?modal=1">Entregar</button>
+                      {% endif %}
+                      {% if can_edit %}
+                        <button type="button" class="textlink js-open-paquete-form" data-modal-title="Editar paquete" data-modal-url="{% url role_ns|add:':edit' 'paquetes' row.key %}?modal=1">Editar</button>
+                      {% endif %}
+                      {% if can_delete %}
+                        <form class="inline" action="{% url role_ns|add:':delete' 'paquetes' row.key %}" method="post" onsubmit="return confirm('¿Eliminar este paquete? Esta acción no se puede deshacer.');">
+                          {% csrf_token %}
+                          <button type="submit" class="danger-link">Eliminar</button>
+                        </form>
+                      {% endif %}
+                      {% if item.estado_paquete.nombre == 'Entregado' and not can_delete and not can_edit %}<span class="muted">Entregado</span>{% endif %}
+                    </div>
+                  </td>
+                </tr>
+              {% else %}
+                <tr>
+                  <td>{{ item.descripcion }}</td>
+                  <td>{{ item.remitente }}</td>
+                  <td>{{ item.fecha_recepcion|date:"Y-m-d H:i" }}</td>
+                  <td>{% if item.fecha_entrega %}{{ item.fecha_entrega|date:"Y-m-d H:i" }}{% else %}Pendiente por entregar{% endif %}</td>
+                  <td>
+                    {% if item.estado_paquete.nombre == 'Entregado' or item.fecha_entrega %}
+                      <span class="badge ok">Entregado</span>
+                    {% else %}
+                      <span class="badge muted">Pendiente por entregar</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endif %}
+            {% endwith %}
+          {% empty %}
+            <tr><td colspan="{% if can_edit or can_delete or can_create %}7{% else %}5{% endif %}" class="empty">No hay paquetes para mostrar</td></tr>
+          {% endfor %}
+        {% else %}
+          {% for row in rows %}
+            {% with item=row.item %}
+              <tr>
+                <td>#{{ row.key }}</td>
+                <td>
+                  <strong>{% if slug == 'apartamentos' %}<a class="textlink" href="{% url role_ns|add:':apartamento_detalle' item.pk %}">{{ item }}</a>{% else %}{{ item }}{% endif %}</strong>
+                  {% if slug == 'apartamentos' %}<div><a class="textlink" href="{% url role_ns|add:':apartamento_detalle' item.pk %}">Ver ficha completa del apartamento</a></div>{% endif %}
+                  {% if slug == "usuarios" %}<div class="muted small">Rol: {{ item.rol|default:"Sin asignar" }} · Estado: {{ item.estado_usuario|default:"-" }} · {{ item.persona.correo|default:"Sin correo" }}</div>{% endif %}
+                  {% if row.links %}<div class="related-links">{% for link in row.links %}<a href="{{ link.url }}">{{ link.label }} ↗</a>{% endfor %}</div>{% endif %}
+                </td>
+                <td>
+                  {% if slug == 'torres' and can_edit %}
+                    <button type="button" class="textlink js-open-torre-modal" data-modal-title="Editar torre" data-modal-url="{% url role_ns|add:':edit' slug row.key %}?modal=1">Editar</button>
+                  {% elif can_edit %}
+                    <a class="textlink" href="{% url role_ns|add:':edit' slug row.key %}">Editar</a>
+                  {% endif %}
+                  {% if can_delete %}<form class="inline" action="{% url role_ns|add:':delete' slug row.key %}" method="post" onsubmit="return confirm('{% if slug == 'torres' %}¿Eliminar esta torre? Esta acción no se puede deshacer.{% else %}¿Eliminar este registro?{% endif %}');">{% csrf_token %}<button class="danger-link">Eliminar</button></form>{% endif %}
+                  {% if not can_edit and not can_delete %}<span class="muted">Consulta</span>{% endif %}
+                </td>
+              </tr>
+            {% endwith %}
+          {% empty %}
+            <tr><td colspan="3" class="empty">No hay registros para mostrar</td></tr>
+          {% endfor %}
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted small">{% if slug == "residentes" %}Se muestran hasta 100 personas distintas con sus vínculos (apartamento_persona).{% elif slug == "personas" %}Se muestran hasta 100 personas. Las personas no se eliminan: usa "Editar" para activar o desactivar y conservar el historial.{% elif slug == "apartamentos" %}Se muestran hasta 100 apartamentos. El estado indica si el apartamento tiene asignación vigente (Asignado/No asignado).{% elif slug == "residentes_apartamentos" %}Se muestran hasta 100 asignaciones. Usa "Salida" para registrar la desvinculación (sin eliminar) y "Reasignar" para reactivar una asignación con salida.{% elif slug == "paquetes" %}Se muestran hasta 100 paquetes. Puedes filtrar por estado, torre y rango de fecha de recepción.{% else %}Se muestran hasta 100 registros. Utiliza los filtros para acotar la búsqueda.{% endif %}</p>
+</div>
+
+{% if slug == 'personas' %}
+<dialog id="persona-edit-modal" class="modal-dialog">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2>Editar persona</h2>
+      <button type="button" class="secondary" id="persona-modal-close" aria-label="Cerrar">Cerrar</button>
+    </div>
+    <div id="persona-modal-body" class="modal-body"><p class="muted">Cargando formulario…</p></div>
+  </div>
+</dialog>
+<style>
+  .modal-dialog{border:none;padding:0;background:transparent;max-width:min(720px,96vw);width:calc(100% - 2rem);margin:auto;inset:0;max-height:calc(100vh - 2rem)}
+  .modal-dialog::backdrop{background:rgba(15,23,42,.45)}
+  .modal-card{background:#fff;border-radius:16px;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,.2);max-height:calc(100vh - 2rem);overflow:auto}
+  .modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+  .modal-header h2{margin:0;font-size:1.2rem}
+  .modal-body .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .modal-body .field label{display:block;font-weight:600;margin-bottom:4px}
+  .modal-body .field input,.modal-body .field select,.modal-body .field textarea{width:100%}
+  .modal-body .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.85em}
+  .badge.ok{background:#dcfce7;color:#166534}
+  .badge.muted{background:#e5e7eb;color:#374151}
+  .row-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .row-actions form.inline{margin:0}
+</style>
+<script>
+(function(){
+  const modal=document.getElementById('persona-edit-modal');
+  const body=document.getElementById('persona-modal-body');
+  const closeBtn=document.getElementById('persona-modal-close');
+  if(!modal||!body) return;
+  function closeModal(){ if(modal.open) modal.close(); }
+  if(closeBtn) closeBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', function(e){ if(e.target===modal) closeModal(); });
+
+  async function loadForm(url){
+    body.innerHTML='<p class="muted">Cargando formulario…</p>';
+    modal.showModal();
+    const resp=await fetch(url, {headers:{'X-Requested-With':'XMLHttpRequest'}});
+    body.innerHTML=await resp.text();
+    bindForm(body.querySelector('form'));
+  }
+  function bindForm(form){
+    if(!form) return;
+    form.addEventListener('submit', async function(ev){
+      ev.preventDefault();
+      const resp=await fetch(form.action || window.location.href, {
+        method:'POST',
+        headers:{'X-Requested-With':'XMLHttpRequest'},
+        body:new FormData(form)
+      });
+      if(resp.redirected){
+        window.location.href=resp.url;
+        return;
+      }
+      const html=await resp.text();
+      if(resp.ok){
+        // En caso de respuesta OK sin redirect, recargar listado para reflejar cambios/mensajes.
+        window.location.reload();
+        return;
+      }
+      body.innerHTML=html;
+      bindForm(body.querySelector('form'));
+    });
+  }
+  document.querySelectorAll('.js-edit-persona').forEach(function(btn){
+    btn.addEventListener('click', function(){ loadForm(btn.dataset.editUrl); });
+  });
+})();
+</script>
+{% endif %}
+
+{% if slug == 'torres' %}
+<dialog id="torre-modal" class="modal-dialog">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2 id="torre-modal-title">Torre</h2>
+      <button type="button" class="secondary" id="torre-modal-close" aria-label="Cerrar">Cerrar</button>
+    </div>
+    <div id="torre-modal-body" class="modal-body"><p class="muted">Cargando formulario…</p></div>
+  </div>
+</dialog>
+<style>
+  .modal-dialog{border:none;padding:0;background:transparent;max-width:min(720px,96vw);width:calc(100% - 2rem);margin:auto;inset:0;max-height:calc(100vh - 2rem)}
+  .modal-dialog::backdrop{background:rgba(15,23,42,.45)}
+  .modal-card{background:#fff;border-radius:16px;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,.2);max-height:calc(100vh - 2rem);overflow:auto}
+  .modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+  .modal-header h2{margin:0;font-size:1.2rem}
+  .modal-body .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .modal-body .field label{display:block;font-weight:600;margin-bottom:4px}
+  .modal-body .field input,.modal-body .field select,.modal-body .field textarea{width:100%}
+  .modal-body .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+</style>
+<script>
+(function(){
+  const modal=document.getElementById('torre-modal');
+  const body=document.getElementById('torre-modal-body');
+  const titleEl=document.getElementById('torre-modal-title');
+  const closeBtn=document.getElementById('torre-modal-close');
+  if(!modal||!body) return;
+  function closeModal(){ if(modal.open) modal.close(); }
+  if(closeBtn) closeBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', function(e){ if(e.target===modal) closeModal(); });
+
+  async function loadForm(url, title){
+    if(titleEl) titleEl.textContent = title || 'Torre';
+    body.innerHTML='<p class="muted">Cargando formulario…</p>';
+    modal.showModal();
+    const resp=await fetch(url, {headers:{'X-Requested-With':'XMLHttpRequest'}});
+    body.innerHTML=await resp.text();
+    bindForm(body.querySelector('form'));
+  }
+  function bindForm(form){
+    if(!form) return;
+    form.addEventListener('submit', async function(ev){
+      ev.preventDefault();
+      const resp=await fetch(form.action || window.location.href, {
+        method:'POST',
+        headers:{'X-Requested-With':'XMLHttpRequest'},
+        body:new FormData(form)
+      });
+      if(resp.redirected){
+        window.location.href=resp.url;
+        return;
+      }
+      const html=await resp.text();
+      if(resp.ok){
+        window.location.reload();
+        return;
+      }
+      body.innerHTML=html;
+      bindForm(body.querySelector('form'));
+    });
+  }
+  document.querySelectorAll('.js-open-torre-modal').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      loadForm(btn.dataset.modalUrl, btn.dataset.modalTitle);
+    });
+  });
+})();
+</script>
+{% endif %}
+
+{% if slug == 'apartamentos' %}
+<dialog id="apartamento-ver-modal" class="modal-dialog">
+  <div class="modal-card" style="max-width:min(900px,96vw)">
+    <div class="modal-header">
+      <h2>Información del apartamento</h2>
+      <button type="button" class="secondary" id="apartamento-ver-close" aria-label="Cerrar">Cerrar</button>
+    </div>
+    <div id="apartamento-ver-body" class="modal-body"><p class="muted">Cargando información…</p></div>
+  </div>
+</dialog>
+<dialog id="apartamento-form-modal" class="modal-dialog">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2 id="apartamento-form-title">Apartamento</h2>
+      <button type="button" class="secondary" id="apartamento-form-close" aria-label="Cerrar">Cerrar</button>
+    </div>
+    <div id="apartamento-form-body" class="modal-body"><p class="muted">Cargando formulario…</p></div>
+  </div>
+</dialog>
+<style>
+  .modal-dialog{border:none;padding:0;background:transparent;max-width:min(720px,96vw);width:calc(100% - 2rem);margin:auto;inset:0;max-height:calc(100vh - 2rem)}
+  .modal-dialog::backdrop{background:rgba(15,23,42,.45)}
+  .modal-card{background:#fff;border-radius:16px;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,.2);max-height:calc(100vh - 2rem);overflow:auto}
+  .modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+  .modal-header h2{margin:0;font-size:1.2rem}
+  .modal-body .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .modal-body .field label{display:block;font-weight:600;margin-bottom:4px}
+  .modal-body .field input,.modal-body .field select,.modal-body .field textarea{width:100%}
+  .modal-body .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  .row-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .row-actions form.inline{margin:0}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.85em}
+  .badge.ok{background:#dcfce7;color:#166534}
+  .badge.muted{background:#e5e7eb;color:#374151}
+</style>
+<script>
+(function(){
+  function setupModal(modalId, bodyId, closeId, titleId){
+    const modal=document.getElementById(modalId);
+    const body=document.getElementById(bodyId);
+    const closeBtn=document.getElementById(closeId);
+    const titleEl=titleId ? document.getElementById(titleId) : null;
+    if(!modal||!body) return null;
+    function closeModal(){ if(modal.open) modal.close(); }
+    if(closeBtn) closeBtn.addEventListener('click', closeModal);
+    modal.addEventListener('click', function(e){ if(e.target===modal) closeModal(); });
+    async function load(url, title){
+      if(titleEl) titleEl.textContent = title || 'Apartamento';
+      body.innerHTML='<p class="muted">Cargando…</p>';
+      modal.showModal();
+      const resp=await fetch(url, {headers:{'X-Requested-With':'XMLHttpRequest'}});
+      body.innerHTML=await resp.text();
+      const form=body.querySelector('form');
+      if(form) bindForm(form, body, load.bind(null, url, title));
+      return resp;
+    }
+    function bindForm(form, container){
+      form.addEventListener('submit', async function(ev){
+        ev.preventDefault();
+        const resp=await fetch(form.action || window.location.href, {
+          method:'POST',
+          headers:{'X-Requested-With':'XMLHttpRequest'},
+          body:new FormData(form)
+        });
+        if(resp.redirected){ window.location.href=resp.url; return; }
+        const html=await resp.text();
+        if(resp.ok){ window.location.reload(); return; }
+        container.innerHTML=html;
+        const next=container.querySelector('form');
+        if(next) bindForm(next, container);
+      });
+    }
+    return {load};
+  }
+
+  const ver = setupModal('apartamento-ver-modal','apartamento-ver-body','apartamento-ver-close', null);
+  const formModal = setupModal('apartamento-form-modal','apartamento-form-body','apartamento-form-close','apartamento-form-title');
+
+  document.querySelectorAll('.js-open-apartamento-ver').forEach(function(btn){
+    btn.addEventListener('click', function(){ if(ver) ver.load(btn.dataset.verUrl, 'Información del apartamento'); });
+  });
+  document.querySelectorAll('.js-open-apartamento-form').forEach(function(btn){
+    btn.addEventListener('click', function(){ if(formModal) formModal.load(btn.dataset.modalUrl, btn.dataset.modalTitle || 'Apartamento'); });
+  });
+})();
+</script>
+{% endif %}
+
+{% if slug == 'residentes_apartamentos' %}
+<dialog id="asignacion-form-modal" class="modal-dialog">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2 id="asignacion-form-title">Nueva asignación</h2>
+      <button type="button" class="secondary" id="asignacion-form-close" aria-label="Cerrar">Cerrar</button>
+    </div>
+    <div id="asignacion-form-body" class="modal-body"><p class="muted">Cargando formulario…</p></div>
+  </div>
+</dialog>
+<style>
+  .modal-dialog{border:none;padding:0;background:transparent;max-width:min(720px,96vw);width:calc(100% - 2rem);margin:auto;inset:0;max-height:calc(100vh - 2rem)}
+  .modal-dialog::backdrop{background:rgba(15,23,42,.45)}
+  .modal-card{background:#fff;border-radius:16px;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,.2);max-height:calc(100vh - 2rem);overflow:auto}
+  .modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+  .modal-header h2{margin:0;font-size:1.2rem}
+  .modal-body .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .modal-body .field label{display:block;font-weight:600;margin-bottom:4px}
+  .modal-body .field input,.modal-body .field select,.modal-body .field textarea{width:100%}
+  .modal-body .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  .row-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .row-actions form.inline{margin:0}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.85em}
+  .badge.ok{background:#dcfce7;color:#166534}
+  .badge.muted{background:#e5e7eb;color:#374151}
+</style>
+<script>
+(function(){
+  const modal=document.getElementById('asignacion-form-modal');
+  const body=document.getElementById('asignacion-form-body');
+  const titleEl=document.getElementById('asignacion-form-title');
+  const closeBtn=document.getElementById('asignacion-form-close');
+  if(!modal||!body) return;
+  function closeModal(){ if(modal.open) modal.close(); }
+  if(closeBtn) closeBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', function(e){ if(e.target===modal) closeModal(); });
+
+  async function loadForm(url, title){
+    if(titleEl) titleEl.textContent = title || 'Nueva asignación';
+    body.innerHTML='<p class="muted">Cargando formulario…</p>';
+    modal.showModal();
+    const resp=await fetch(url, {headers:{'X-Requested-With':'XMLHttpRequest'}});
+    body.innerHTML=await resp.text();
+    bindForm(body.querySelector('form'));
+  }
+  function bindForm(form){
+    if(!form) return;
+    form.addEventListener('submit', async function(ev){
+      ev.preventDefault();
+      const resp=await fetch(form.action || window.location.href, {
+        method:'POST',
+        headers:{'X-Requested-With':'XMLHttpRequest'},
+        body:new FormData(form)
+      });
+      if(resp.redirected){ window.location.href=resp.url; return; }
+      const html=await resp.text();
+      if(resp.ok){ window.location.reload(); return; }
+      body.innerHTML=html;
+      bindForm(body.querySelector('form'));
+    });
+  }
+  document.querySelectorAll('.js-open-asignacion-form').forEach(function(btn){
+    btn.addEventListener('click', function(){ loadForm(btn.dataset.modalUrl, btn.dataset.modalTitle); });
+  });
+})();
+</script>
+{% endif %}
+
+{% if slug == 'paquetes' %}
+<dialog id="paquete-form-modal" class="modal-dialog">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2 id="paquete-form-title">Registrar paquete</h2>
+      <button type="button" class="secondary" id="paquete-form-close" aria-label="Cerrar">Cerrar</button>
+    </div>
+    <div id="paquete-form-body" class="modal-body"><p class="muted">Cargando formulario…</p></div>
+  </div>
+</dialog>
+<dialog id="paquete-entregar-modal" class="modal-dialog">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2 id="paquete-entregar-title">Entregar paquete</h2>
+      <button type="button" class="secondary" id="paquete-entregar-close" aria-label="Cerrar">Cerrar</button>
+    </div>
+    <div id="paquete-entregar-body" class="modal-body"><p class="muted">Cargando formulario…</p></div>
+  </div>
+</dialog>
+<style>
+  .modal-dialog{border:none;padding:0;background:transparent;max-width:min(720px,96vw);width:calc(100% - 2rem);margin:auto;inset:0;max-height:calc(100vh - 2rem)}
+  .modal-dialog::backdrop{background:rgba(15,23,42,.45)}
+  .modal-card{background:#fff;border-radius:16px;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,.2);max-height:calc(100vh - 2rem);overflow:auto}
+  .modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+  .modal-header h2{margin:0;font-size:1.2rem}
+  .modal-body .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .modal-body .field label{display:block;font-weight:600;margin-bottom:4px}
+  .modal-body .field input,.modal-body .field select,.modal-body .field textarea{width:100%}
+  .modal-body .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  .filters .date-filter{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:#475569}
+  .filters .date-filter input{min-width:160px}
+  .row-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .row-actions form.inline{margin:0}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.85em}
+  .badge.ok{background:#dcfce7;color:#166534}
+  .badge.muted{background:#e5e7eb;color:#374151}
+</style>
+<script>
+(function(){
+  function setup(modalId, bodyId, titleId, closeId){
+    const modal=document.getElementById(modalId);
+    const body=document.getElementById(bodyId);
+    const titleEl=document.getElementById(titleId);
+    const closeBtn=document.getElementById(closeId);
+    if(!modal||!body) return null;
+    function closeModal(){ if(modal.open) modal.close(); }
+    if(closeBtn) closeBtn.addEventListener('click', closeModal);
+    modal.addEventListener('click', function(e){ if(e.target===modal) closeModal(); });
+    async function load(url, title){
+      if(titleEl) titleEl.textContent = title || '';
+      body.innerHTML='<p class="muted">Cargando formulario…</p>';
+      modal.showModal();
+      const resp=await fetch(url, {headers:{'X-Requested-With':'XMLHttpRequest'}});
+      body.innerHTML=await resp.text();
+      bind(body);
+      return resp;
+    }
+    function bind(container){
+      container.querySelectorAll('.js-modal-cancel').forEach(function(btn){ btn.addEventListener('click', closeModal); });
+      const form=container.querySelector('form');
+      if(!form) return;
+      form.addEventListener('submit', async function(ev){
+        ev.preventDefault();
+        const resp=await fetch(form.action || window.location.href, {
+          method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body:new FormData(form)
+        });
+        if(resp.redirected){ window.location.href=resp.url; return; }
+        const html=await resp.text();
+        if(resp.ok){ window.location.reload(); return; }
+        container.innerHTML=html;
+        bind(container);
+      });
+    }
+    return {load, closeModal};
+  }
+  const formModal = setup('paquete-form-modal','paquete-form-body','paquete-form-title','paquete-form-close');
+  const entregarModal = setup('paquete-entregar-modal','paquete-entregar-body','paquete-entregar-title','paquete-entregar-close');
+  document.querySelectorAll('.js-open-paquete-form').forEach(function(btn){
+    btn.addEventListener('click', function(){ if(formModal) formModal.load(btn.dataset.modalUrl, btn.dataset.modalTitle || 'Paquete'); });
+  });
+  document.querySelectorAll('.js-open-paquete-entregar').forEach(function(btn){
+    btn.addEventListener('click', function(){ if(entregarModal) entregarModal.load(btn.dataset.modalUrl, btn.dataset.modalTitle || 'Entregar paquete'); });
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}
