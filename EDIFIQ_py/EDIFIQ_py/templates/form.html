@@ -1,11 +1,1 @@
-{% extends 'base.html' %}{% block content %}<div class="eyebrow">MÓDULOS / {% if editing %}EDITAR{% else %}REGISTRAR{% endif %}</div><h1>{% if editing %}Editar{% else %}Registrar{% endif %} en {{ title }}</h1><div class="panel form-panel"><form method="post">{% csrf_token %}{% if form.non_field_errors %}<div class="notice">{{ form.non_field_errors }}</div>{% endif %}<div class="form-grid">{% for field in form %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}{% for error in field.errors %}<small class="error">{{ error }}</small>{% endfor %}</div>{% endfor %}</div><div class="actions"><button class="primary">Guardar registro</button><a class="secondary linkbutton" href="{% url role_ns|add:':module' slug %}">Cancelar</a></div></form></div>{% if slug == 'usuarios' %}<script>
-(function(){
-  const select=document.getElementById('id_persona');
-  if(!select)return;
-  const first=document.getElementById('id_first_name');
-  const last=document.getElementById('id_last_name');
-  const email=document.getElementById('id_email');
-  function fill(){const option=select.options[select.selectedIndex];if(!option)return;const raw=option.textContent.trim();const parts=raw.split(' ');if(first)first.value=option.dataset.nombres||parts.slice(0,1).join(' ');if(last)last.value=option.dataset.apellidos||parts.slice(1).join(' ');if(email)email.value=option.dataset.correo||'';}
-  select.addEventListener('change',fill);
-})();
-</script>{% endif %}{% endblock %}
+{% extends 'base.html' %}{% block content %}<div class="eyebrow">MÓDULOS / {% if editing %}EDITAR{% else %}REGISTRAR{% endif %}</div><h1>{% if editing %}Editar{% else %}Registrar{% endif %} en {{ title }}</h1><div class="panel form-panel"><form method="post">{% csrf_token %}{% if form.non_field_errors %}<div class="notice">{{ form.non_field_errors }}</div>{% endif %}<div class="form-grid">{% for field in form %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}{% for error in field.errors %}<small class="error">{{ error }}</small>{% endfor %}</div>{% endfor %}</div><div class="actions"><button class="primary">Guardar registro</button><a class="secondary linkbutton" href="{% url role_ns|add:':module' slug %}">Cancelar</a></div></form></div>{% endblock %}

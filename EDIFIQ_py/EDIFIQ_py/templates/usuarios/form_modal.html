@@ -1,0 +1,19 @@
+<form method="post" action="{% if editing %}{% url role_ns|add:':edit' slug form.instance.pk %}{% else %}{% url role_ns|add:':create' slug %}{% endif %}?modal=1" class="usuario-form">
+  {% csrf_token %}
+  <input type="hidden" name="modal" value="1">
+  {% if form.non_field_errors %}<div class="notice notice-error">{{ form.non_field_errors }}</div>{% endif %}
+  <div class="form-grid">
+    {% for field in form %}
+      <div class="field">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}
+        {% for error in field.errors %}<small class="error">{{ error }}</small>{% endfor %}
+      </div>
+    {% endfor %}
+  </div>
+  <div class="actions">
+    <button class="primary" type="submit">{% if editing %}Guardar cambios{% else %}Registrar usuario{% endif %}</button>
+    <button class="secondary js-modal-cancel" type="button">Cancelar</button>
+  </div>
+</form>

@@ -1,14 +1,21 @@
-﻿from django.contrib import messages
-from django.db import transaction
+import logging
+import mimetypes
+from datetime import date
+from decimal import Decimal, InvalidOperation
+from uuid import uuid4
+
+from django.contrib import messages
+from django.core.files.storage import default_storage
+from django.db import DatabaseError, transaction
 from django.db.models import Exists, OuterRef, Q
-from django.http import Http404, HttpResponse, HttpResponseForbidden
+from django.http import FileResponse, Http404, HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 from urllib.parse import urlencode
 
-from apps.core.models import EstadoPaquete, EstadoRecibo, EstadoReserva, EstadoUsuario, EstadoVisita, Rol, TipoDocumento, TipoResidente, Usuario as UsuarioEsquema
+from apps.core.models import EstadoPaquete, EstadoRecibo, EstadoReserva, EstadoUsuario, EstadoVisita, Rol, TipoDocumento, TipoResidente, TipoServicio, TipoVisita, Usuario as UsuarioEsquema
 from apps.core.schema_auth import check_schema_password, login_schema_user, logout_schema_user, set_schema_password
 from apps.paquetes.models import Paquete
 from apps.personas.models import Persona
@@ -29,9 +36,20 @@ from .access import (
     role_name_for_slug,
     role_slug_for_name,
 )
-from .forms import AsignacionResidenteForm, PaqueteEntregaForm, TorreMasivaForm, UsuarioForm, form_for
+from .forms import (
+    AsignacionResidenteForm,
+    FamiliarForm,
+    PaqueteEntregaForm,
+    ReciboComprobanteForm,
+    TorreMasivaForm,
+    UsuarioForm,
+    form_for,
+    reserva_tiene_conflicto_aprobado,
+)
+from .package_notifications import schedule_package_received_email
 from apps.usuarios.forms import RegistroCuentaForm, RegistroPersonaForm
 
+logger = logging.getLogger(__name__)
 ROLE_NAMESPACES = ('administrador', 'residente', 'vigilante')
 
 MODULES = {
@@ -49,16 +67,30 @@ MODULES = {
 }
 SEARCH = {
     'personas': ['nombres', 'apellidos', 'numero_documento', 'correo'],
-    'residentes': ['persona__nombres', 'persona__apellidos', 'persona__numero_documento', 'apartamento__numero_apartamento', 'tipo_residente__nombre'],
+    'residentes': [
+        'persona__nombres', 'persona__apellidos', 'persona__numero_documento',
+        'persona__telefono', 'persona__correo', 'apartamento__numero_apartamento',
+        'apartamento__torre__nombre_torre', 'tipo_residente__nombre',
+    ],
     'residentes_apartamentos': ['persona__nombres', 'persona__apellidos', 'persona__numero_documento', 'apartamento__numero_apartamento', 'apartamento__torre__nombre_torre', 'tipo_residente__nombre'],
     'torres': ['nombre_torre'],
     'apartamentos': ['numero_apartamento', 'torre__nombre_torre'],
     'visitas': ['nombre_visitante', 'documento_visitante', 'tipo_visita__nombre', 'estado_visita__nombre'],
     'paquetes': ['remitente', 'descripcion', 'estado_paquete__nombre'],
-    'recibos': ['tipo_servicio__nombre', 'periodo', 'estado_recibo__nombre'],
+    'recibos': [
+        'tipo_servicio__nombre', 'periodo', 'estado_recibo__nombre',
+        'apartamento__numero_apartamento', 'apartamento__torre__nombre_torre',
+    ],
     'zonas': ['nombre', 'descripcion'],
-    'reservas': ['zona__nombre', 'estado_reserva__nombre'],
-    'usuarios': ['username', 'persona__nombres', 'persona__apellidos', 'persona__correo', 'rol__nombre', 'estado_usuario__nombre'],
+    'reservas': [
+        'zona__nombre', 'estado_reserva__nombre',
+        'apartamento__numero_apartamento', 'apartamento__torre__nombre_torre',
+    ],
+    'usuarios': [
+        'username', 'persona__nombres', 'persona__apellidos',
+        'persona__numero_documento', 'persona__correo', 'rol__nombre',
+        'estado_usuario__nombre',
+    ],
 }
 STATUS = {
     'visitas': 'estado_visita__nombre',
@@ -83,13 +115,19 @@ FILTERS = {
     'personas': ('pk',),
     'residentes': ('persona', 'apartamento'),
     'residentes_apartamentos': ('persona', 'apartamento'),
-    'usuarios': ('perfil__persona',),
+    'usuarios': ('persona',),
     'apartamentos': ('torre',),
     'visitas': ('apartamento',),
     'paquetes': ('apartamento',),
     'recibos': ('apartamento',),
     'reservas': ('apartamento', 'zona'),
 }
+VISIT_STATUS_FILTERS = (
+    ('pendiente', 'Pendiente por autorizar'),
+    ('autorizada', 'Autorizada'),
+    ('finalizada', 'Finalizada'),
+    ('cancelada', 'Cancelada'),
+)
 
 
 def is_composite_model(model):
@@ -120,6 +158,127 @@ def get_object_by_key(model, key):
 def _estado_nombre(obj, field_name):
     rel = getattr(obj, field_name, None)
     return getattr(rel, 'nombre', '') if rel else ''
+
+
+def visita_estado_display(visita):
+    estado = _estado_nombre(visita, 'estado_visita')
+    if estado in ('Finalizada', 'Cancelada'):
+        return estado
+    if visita.fecha_salida:
+        return 'Finalizada'
+    return 'Autorizada' if visita.autorizada or estado == 'Ingresó' else 'Pendiente por autorizar'
+
+
+def apply_visita_filters(request, qs):
+    tipo = request.GET.get('visita_tipo', '').strip()
+    estado = request.GET.get('visita_estado', '').strip()
+    torre = request.GET.get('visita_torre', '').strip()
+    ingreso_desde = request.GET.get('ingreso_desde', '').strip()
+    salida_desde = request.GET.get('salida_desde', '').strip()
+
+    if tipo.isdecimal():
+        qs = qs.filter(tipo_visita_id=int(tipo))
+    if torre.isdecimal():
+        qs = qs.filter(apartamento__torre_id=int(torre))
+    if estado == 'pendiente':
+        qs = qs.filter(autorizada=False).exclude(
+            estado_visita__nombre__in=('Ingresó', 'Finalizada', 'Cancelada')
+        )
+    elif estado == 'autorizada':
+        qs = qs.filter(Q(autorizada=True) | Q(estado_visita__nombre='Ingresó')).exclude(
+            estado_visita__nombre__in=('Finalizada', 'Cancelada')
+        ).filter(fecha_salida__isnull=True)
+    elif estado == 'finalizada':
+        qs = qs.filter(Q(estado_visita__nombre='Finalizada') | Q(fecha_salida__isnull=False))
+    elif estado == 'cancelada':
+        qs = qs.filter(estado_visita__nombre='Cancelada')
+
+    import datetime
+    try:
+        ingreso_date = datetime.date.fromisoformat(ingreso_desde)
+    except ValueError:
+        ingreso_date = None
+    try:
+        salida_date = datetime.date.fromisoformat(salida_desde)
+    except ValueError:
+        salida_date = None
+    if ingreso_date:
+        inicio_ingreso = timezone.make_aware(
+            datetime.datetime.combine(ingreso_date, datetime.time.min),
+            timezone.get_current_timezone(),
+        )
+        qs = qs.filter(fecha_ingreso__gte=inicio_ingreso)
+    if salida_date:
+        inicio_salida = timezone.make_aware(
+            datetime.datetime.combine(salida_date, datetime.time.min),
+            timezone.get_current_timezone(),
+        )
+        qs = qs.filter(fecha_salida__gte=inicio_salida)
+    return qs
+
+
+def apply_reserva_filters(request, qs):
+    zona = request.GET.get('reserva_zona', '').strip()
+    estado = request.GET.get('reserva_estado', '').strip()
+    fecha_desde = request.GET.get('reserva_desde', '').strip()
+    fecha_hasta = request.GET.get('reserva_hasta', '').strip()
+    invitados_minimos = request.GET.get('invitados_minimos', '').strip()
+
+    if zona.isdecimal():
+        qs = qs.filter(zona_id=int(zona))
+    if estado in ('Pendiente', 'Aprobada', 'Cancelada'):
+        qs = qs.filter(estado_reserva__nombre=estado)
+    try:
+        fecha_desde_value = date.fromisoformat(fecha_desde)
+    except ValueError:
+        fecha_desde_value = None
+    try:
+        fecha_hasta_value = date.fromisoformat(fecha_hasta)
+    except ValueError:
+        fecha_hasta_value = None
+    if fecha_desde_value:
+        qs = qs.filter(fecha_reserva__gte=fecha_desde_value)
+    if fecha_hasta_value:
+        qs = qs.filter(fecha_reserva__lte=fecha_hasta_value)
+    if invitados_minimos.isdecimal():
+        qs = qs.filter(cantidad_invitados__gte=int(invitados_minimos))
+    return qs
+
+
+def apply_recibo_filters(request, qs, role_name):
+    service = request.GET.get('recibo_servicio', '').strip()
+    status = request.GET.get('recibo_estado', '').strip()
+    tower = request.GET.get('recibo_torre', '').strip()
+    due_from = request.GET.get('vence_desde', '').strip()
+    due_to = request.GET.get('vence_hasta', '').strip()
+    minimum = request.GET.get('valor_minimo', '').strip()
+
+    if service.isdecimal():
+        qs = qs.filter(tipo_servicio_id=int(service))
+    if status:
+        qs = qs.filter(estado_recibo__nombre=status)
+    if role_name != 'Residente' and tower.isdecimal():
+        qs = qs.filter(apartamento__torre_id=int(tower))
+    try:
+        due_from_value = date.fromisoformat(due_from)
+    except ValueError:
+        due_from_value = None
+    try:
+        due_to_value = date.fromisoformat(due_to)
+    except ValueError:
+        due_to_value = None
+    if due_from_value:
+        qs = qs.filter(fecha_vencimiento__gte=due_from_value)
+    if due_to_value:
+        qs = qs.filter(fecha_vencimiento__lte=due_to_value)
+    if role_name != 'Residente' and minimum:
+        try:
+            minimum_value = Decimal(minimum)
+        except InvalidOperation:
+            minimum_value = None
+        if minimum_value is not None and minimum_value.is_finite() and minimum_value >= 0:
+            qs = qs.filter(valor__gte=minimum_value)
+    return qs
 
 
 def request_ns(request):
@@ -176,6 +335,8 @@ def context(request):
         for s, (t, _m) in MODULES.items():
             if allowed(request.user, s, 'ver'):
                 label = 'Mi apartamento' if s == 'apartamentos' and nombre == 'Residente' else t
+                if s == 'residentes' and nombre == 'Residente':
+                    label = 'Familiares'
                 nav.append((s, label))
     ns = request_ns(request) or slug
     return {'role': nombre or 'Sin rol', 'role_ns': ns, 'navigation': nav}
@@ -296,6 +457,169 @@ def edit_redirect(request, slug, pk):
 
 
 @login_required
+def recibo_comprobante_upload_view(request, pk):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if rol_nombre != 'Residente':
+        return HttpResponseForbidden('Solo los residentes pueden subir comprobantes')
+
+    recibo = get_object_or_404(
+        Recibo.objects.select_related('estado_recibo'),
+        pk=pk,
+    )
+    if recibo.apartamento_id not in apartamentos_autorizados(request.user):
+        return HttpResponseForbidden('No puedes subir comprobantes de otro apartamento')
+    if _estado_nombre(recibo, 'estado_recibo') != 'Pendiente' or recibo.comprobante:
+        messages.error(request, 'Este recibo no está disponible para subir un comprobante.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='recibos')
+
+    if request.method == 'GET':
+        return render(request, 'recibos/comprobante_form_modal.html', {
+            **context(request), 'form': ReciboComprobanteForm(), 'recibo': recibo,
+        })
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+
+    form = ReciboComprobanteForm(request.POST, request.FILES)
+    if not form.is_valid():
+        response = render(request, 'recibos/comprobante_form_modal.html', {
+            **context(request), 'form': form, 'recibo': recibo,
+        })
+        response.status_code = 400
+        return response
+
+    estado_revision = EstadoRecibo.objects.filter(nombre__iexact='Pendiente por revisar').first()
+    if estado_revision is None:
+        messages.error(request, 'Falta el estado de recibo "Pendiente por revisar" en la base de datos.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='recibos')
+
+    archivo = form.cleaned_data['comprobante']
+    extension = archivo.name.rsplit('.', 1)[-1].lower()
+    extension = '.jpeg' if extension == 'jpeg' else f'.{extension}'
+    ruta = default_storage.save(f'recibos_comprobantes/{uuid4().hex}{extension}', archivo)
+    recibo.comprobante = ruta
+    recibo.estado_recibo = estado_revision
+    try:
+        recibo.save(update_fields=['comprobante', 'estado_recibo', 'fecha_actualizacion'])
+    except DatabaseError:
+        try:
+            default_storage.delete(ruta)
+        except OSError:
+            logger.exception('No se pudo limpiar el comprobante tras fallar el recibo %s', pk)
+        raise
+    messages.success(request, 'Comprobante enviado para revisión.')
+    return redirect(f"{request.resolver_match.namespace}:module", slug='recibos')
+
+
+@login_required
+def recibo_comprobante_view(request, pk):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if rol_nombre not in ('Administrador', 'Residente'):
+        return HttpResponseForbidden('No tienes permiso para consultar comprobantes')
+    recibo = get_object_or_404(Recibo, pk=pk)
+    if rol_nombre == 'Residente' and recibo.apartamento_id not in apartamentos_autorizados(request.user):
+        return HttpResponseForbidden('No puedes consultar comprobantes de otro apartamento')
+    if not recibo.comprobante:
+        raise Http404
+    try:
+        archivo = default_storage.open(recibo.comprobante, 'rb')
+    except OSError:
+        logger.exception('No se pudo abrir el comprobante del recibo %s', pk)
+        raise Http404
+    content_type = mimetypes.guess_type(recibo.comprobante)[0] or 'application/octet-stream'
+    response = FileResponse(archivo, content_type=content_type)
+    extension = mimetypes.guess_extension(content_type) or ''
+    response['Content-Disposition'] = f'inline; filename="comprobante-{pk}{extension}"'
+    response['X-Content-Type-Options'] = 'nosniff'
+    return response
+
+
+@login_required
+@require_POST
+def recibo_cancelar_comprobante_view(request, pk):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if rol_nombre != 'Residente':
+        return HttpResponseForbidden('Solo los residentes pueden cancelar una subida')
+    recibo = get_object_or_404(Recibo.objects.select_related('estado_recibo'), pk=pk)
+    if recibo.apartamento_id not in apartamentos_autorizados(request.user):
+        return HttpResponseForbidden('No puedes cancelar comprobantes de otro apartamento')
+    if _estado_nombre(recibo, 'estado_recibo') != 'Pendiente por revisar' or not recibo.comprobante:
+        messages.error(request, 'El recibo no tiene una subida pendiente por cancelar.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='recibos')
+    estado_pendiente = EstadoRecibo.objects.filter(nombre__iexact='Pendiente').first()
+    if estado_pendiente is None:
+        messages.error(request, 'Falta el estado de recibo "Pendiente" en la base de datos.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='recibos')
+
+    ruta = recibo.comprobante
+    recibo.comprobante = None
+    recibo.estado_recibo = estado_pendiente
+    recibo.save(update_fields=['comprobante', 'estado_recibo', 'fecha_actualizacion'])
+    try:
+        default_storage.delete(ruta)
+    except OSError:
+        logger.exception('No se pudo borrar el comprobante cancelado del recibo %s', pk)
+        messages.warning(request, 'Se canceló la subida, pero no se pudo borrar el archivo.')
+    else:
+        messages.success(request, 'Subida cancelada. Puedes cargar otro comprobante.')
+    return redirect(f"{request.resolver_match.namespace}:module", slug='recibos')
+
+
+@login_required
+@require_POST
+def recibo_revision_view(request, pk, decision):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if rol_nombre != 'Administrador':
+        return HttpResponseForbidden('Solo el administrador puede revisar comprobantes')
+    if decision not in ('aprobar', 'rechazar'):
+        raise Http404
+    recibo = get_object_or_404(Recibo.objects.select_related('estado_recibo'), pk=pk)
+    if _estado_nombre(recibo, 'estado_recibo') != 'Pendiente por revisar' or not recibo.comprobante:
+        messages.error(request, 'El recibo no tiene un comprobante pendiente de revisión.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='recibos',)
+
+    if decision == 'aprobar':
+        estado_destino = EstadoRecibo.objects.filter(nombre__iexact='Pagado').first()
+        if estado_destino is None:
+            messages.error(request, 'Falta el estado de recibo "Pagado" en la base de datos.')
+            return redirect(f"{request.resolver_match.namespace}:module", slug='recibos')
+        if not default_storage.exists(recibo.comprobante):
+            messages.error(request, 'No se encontró el archivo del comprobante; no se puede aprobar.')
+            return redirect(f"{request.resolver_match.namespace}:module", slug='recibos',)
+        recibo.estado_recibo = estado_destino
+        recibo.save(update_fields=['estado_recibo', 'fecha_actualizacion'])
+        messages.success(request, 'Comprobante aprobado; recibo marcado como pagado.')
+    else:
+        estado_destino = EstadoRecibo.objects.filter(nombre__iexact='Pendiente').first()
+        if estado_destino is None:
+            messages.error(request, 'Falta el estado de recibo "Pendiente" en la base de datos.')
+            return redirect(f"{request.resolver_match.namespace}:module", slug='recibos')
+        ruta = recibo.comprobante
+        recibo.comprobante = None
+        recibo.estado_recibo = estado_destino
+        recibo.save(update_fields=['comprobante', 'estado_recibo', 'fecha_actualizacion'])
+        try:
+            default_storage.delete(ruta)
+        except OSError:
+            logger.exception('No se pudo borrar el comprobante rechazado del recibo %s', pk)
+            messages.warning(request, 'Comprobante rechazado, pero no se pudo borrar el archivo.')
+        else:
+            messages.success(request, 'Comprobante rechazado; el residente puede volver a enviarlo.')
+    return redirect(f"{request.resolver_match.namespace}:module", slug='recibos')
+
+
+@login_required
 @require_POST
 def delete_redirect(request, slug, pk):
     _rol, _nombre, rslug = resolve_schema_role(request.user)
@@ -382,6 +706,224 @@ def asignacion_reasignar_redirect(request, slug, pk):
     if ns not in ROLE_NAMESPACES:
         request.resolver_match.namespace = rslug
     return asignacion_reasignar_view(request, slug, pk)
+
+
+@login_required
+@require_POST
+def visita_autorizar_view(request, slug, pk):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    if slug != 'visitas':
+        raise Http404
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if rol_nombre != 'Residente':
+        return HttpResponseForbidden('Solo un residente puede autorizar esta visita')
+    visita = get_object_or_404(Visita, pk=pk)
+    if visita.apartamento_id not in apartamentos_autorizados(request.user):
+        return HttpResponseForbidden('No puedes autorizar visitas de otro apartamento')
+    estado = _estado_nombre(visita, 'estado_visita')
+    if estado in ('Finalizada', 'Cancelada') or visita.fecha_salida:
+        messages.error(request, 'Esta visita ya no se puede autorizar.')
+    elif visita.autorizada:
+        messages.info(request, 'La visita ya está autorizada.')
+    else:
+        visita.autorizada = True
+        visita.save(update_fields=['autorizada', 'fecha_actualizacion'])
+        messages.success(request, 'Visita autorizada correctamente.')
+    return redirect(f"{request.resolver_match.namespace}:module", slug='visitas')
+
+
+@login_required
+@require_POST
+def visita_autorizar_redirect(request, slug, pk):
+    _rol, _nombre, role_slug = resolve_schema_role(request.user)
+    if not role_slug:
+        return HttpResponseForbidden('Sin rol asignado')
+    request.resolver_match.namespace = role_slug
+    return visita_autorizar_view(request, slug, pk)
+
+
+@login_required
+@require_POST
+def visita_finalizar_view(request, slug, pk):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    if slug != 'visitas':
+        raise Http404
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if rol_nombre not in ('Administrador', 'Vigilante'):
+        return HttpResponseForbidden('Solo administrador o vigilante puede finalizar visitas')
+    visita = get_object_or_404(Visita, pk=pk)
+    estado_actual = _estado_nombre(visita, 'estado_visita')
+    if estado_actual in ('Finalizada', 'Cancelada') or visita.fecha_salida:
+        messages.info(request, 'Esta visita ya está finalizada o cancelada.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='visitas')
+    if not visita.autorizada and estado_actual != 'Ingresó':
+        messages.error(request, 'El residente debe autorizar la visita antes de finalizarla.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='visitas')
+    estado_finalizada = EstadoVisita.objects.filter(nombre__iexact='Finalizada').first()
+    if estado_finalizada is None:
+        messages.error(request, 'Falta el estado de visita "Finalizada" en la base de datos.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='visitas')
+    visita.fecha_salida = timezone.now()
+    visita.estado_visita = estado_finalizada
+    visita.save(update_fields=['fecha_salida', 'estado_visita', 'fecha_actualizacion'])
+    messages.success(request, 'Visita finalizada; se registró la fecha y hora de salida.')
+    return redirect(f"{request.resolver_match.namespace}:module", slug='visitas')
+
+
+@login_required
+@require_POST
+def visita_finalizar_redirect(request, slug, pk):
+    _rol, _nombre, role_slug = resolve_schema_role(request.user)
+    if not role_slug:
+        return HttpResponseForbidden('Sin rol asignado')
+    request.resolver_match.namespace = role_slug
+    return visita_finalizar_view(request, slug, pk)
+
+
+@login_required
+@require_POST
+def visita_cancelar_view(request, slug, pk):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    if slug != 'visitas':
+        raise Http404
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if rol_nombre not in ('Administrador', 'Vigilante', 'Residente'):
+        return HttpResponseForbidden('No tienes permiso para cancelar visitas')
+    visita = get_object_or_404(Visita, pk=pk)
+    if rol_nombre == 'Residente' and visita.apartamento_id not in apartamentos_autorizados(request.user):
+        return HttpResponseForbidden('No puedes cancelar visitas de otro apartamento')
+    estado_actual = _estado_nombre(visita, 'estado_visita')
+    if estado_actual == 'Cancelada':
+        messages.info(request, 'Esta visita ya está cancelada.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='visitas')
+    if estado_actual == 'Finalizada' or visita.fecha_salida:
+        messages.error(request, 'No se puede cancelar una visita finalizada.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='visitas')
+    estado_cancelada = EstadoVisita.objects.filter(nombre__iexact='Cancelada').first()
+    if estado_cancelada is None:
+        messages.error(request, 'Falta el estado de visita "Cancelada" en la base de datos.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='visitas')
+    visita.estado_visita = estado_cancelada
+    visita.save(update_fields=['estado_visita', 'fecha_actualizacion'])
+    messages.success(request, 'Visita cancelada correctamente.')
+    return redirect(f"{request.resolver_match.namespace}:module", slug='visitas')
+
+
+@login_required
+@require_POST
+def visita_cancelar_redirect(request, slug, pk):
+    _rol, _nombre, role_slug = resolve_schema_role(request.user)
+    if not role_slug:
+        return HttpResponseForbidden('Sin rol asignado')
+    request.resolver_match.namespace = role_slug
+    return visita_cancelar_view(request, slug, pk)
+
+
+@login_required
+@require_POST
+@transaction.atomic
+def reserva_aprobar_view(request, slug, pk):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    if slug != 'reservas':
+        raise Http404
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if rol_nombre != 'Administrador':
+        return HttpResponseForbidden('Solo el administrador puede aprobar reservas')
+    if not allowed(request.user, slug, 'editar'):
+        return HttpResponseForbidden('Sin permiso para aprobar reservas')
+    reserva = get_object_or_404(Reserva, pk=pk)
+    estado_actual = _estado_nombre(reserva, 'estado_reserva')
+    if estado_actual == 'Aprobada':
+        messages.info(request, 'Esta reserva ya está aprobada.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+    if estado_actual == 'Cancelada':
+        messages.error(request, 'No se puede aprobar una reserva cancelada.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+    if estado_actual != 'Pendiente':
+        messages.error(request, 'Solo se pueden aprobar reservas pendientes.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+    if reserva_tiene_conflicto_aprobado(
+        reserva.zona,
+        reserva.fecha_reserva,
+        reserva.hora_inicio,
+        reserva.hora_fin,
+        exclude_pk=reserva.pk,
+    ):
+        messages.error(
+            request,
+            'No puedes aprobar esta reserva porque ya hay una reserva aprobada en ese horario.',
+        )
+        return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+    estado_aprobada = EstadoReserva.objects.filter(nombre__iexact='Aprobada').first()
+    if estado_aprobada is None:
+        messages.error(request, 'Falta el estado de reserva "Aprobada" en la base de datos.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+    reserva.estado_reserva = estado_aprobada
+    reserva.save(update_fields=['estado_reserva', 'fecha_actualizacion'])
+    messages.success(request, 'Reserva aprobada correctamente.')
+    return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+
+
+@login_required
+@require_POST
+def reserva_aprobar_redirect(request, slug, pk):
+    _rol, _nombre, role_slug = resolve_schema_role(request.user)
+    if not role_slug:
+        return HttpResponseForbidden('Sin rol asignado')
+    request.resolver_match.namespace = role_slug
+    return reserva_aprobar_view(request, slug, pk)
+
+
+@login_required
+@require_POST
+@transaction.atomic
+def reserva_cancelar_view(request, slug, pk):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    if slug != 'reservas':
+        raise Http404
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if rol_nombre not in ('Administrador', 'Residente'):
+        return HttpResponseForbidden('No tienes permiso para cancelar reservas')
+    if not allowed(request.user, slug, 'editar'):
+        return HttpResponseForbidden('Sin permiso para cancelar reservas')
+    reserva = get_object_or_404(Reserva, pk=pk)
+    if rol_nombre == 'Residente' and reserva.apartamento_id not in apartamentos_autorizados(request.user):
+        return HttpResponseForbidden('No puedes cancelar reservas de otro apartamento')
+    estado_actual = _estado_nombre(reserva, 'estado_reserva')
+    if estado_actual == 'Cancelada':
+        messages.info(request, 'Esta reserva ya está cancelada.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+    if estado_actual not in ('Pendiente', 'Aprobada'):
+        messages.error(request, 'Solo se pueden cancelar reservas pendientes o aprobadas.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+    estado_cancelada = EstadoReserva.objects.filter(nombre__iexact='Cancelada').first()
+    if estado_cancelada is None:
+        messages.error(request, 'Falta el estado de reserva "Cancelada" en la base de datos.')
+        return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+    reserva.estado_reserva = estado_cancelada
+    reserva.save(update_fields=['estado_reserva', 'fecha_actualizacion'])
+    messages.success(request, 'Reserva cancelada correctamente.')
+    return redirect(f"{request.resolver_match.namespace}:module", slug='reservas')
+
+
+@login_required
+@require_POST
+def reserva_cancelar_redirect(request, slug, pk):
+    _rol, _nombre, role_slug = resolve_schema_role(request.user)
+    if not role_slug:
+        return HttpResponseForbidden('Sin rol asignado')
+    request.resolver_match.namespace = role_slug
+    return reserva_cancelar_view(request, slug, pk)
 
 
 @login_required
@@ -493,7 +1035,7 @@ def _dashboard_impl(request, role_slug):
     alerts = []
     if role_slug == 'administrador':
         if allowed(request.user, 'visitas', 'ver'):
-            alerts.append(('Visitas pendientes', scoped(request.user, 'visitas', Visita.objects.filter(estado_visita__nombre='Pendiente')).count()))
+            alerts.append(('Visitas pendientes', scoped(request.user, 'visitas', Visita.objects.filter(autorizada=False, estado_visita__nombre='Pendiente')).count()))
         if allowed(request.user, 'paquetes', 'ver'):
             alerts.append(('Paquetes por entregar', scoped(request.user, 'paquetes', Paquete.objects.filter(estado_paquete__nombre='Recibido')).count()))
         if allowed(request.user, 'recibos', 'ver'):
@@ -516,10 +1058,10 @@ def _dashboard_impl(request, role_slug):
         if allowed(request.user, 'reservas', 'ver'):
             alerts.append(('Mis reservas (hoy en adelante)', scoped(request.user, 'reservas', Reserva.objects.filter(fecha_reserva__gte=today)).exclude(estado_reserva__nombre='Cancelada').count()))
         if allowed(request.user, 'visitas', 'ver'):
-            alerts.append(('Visitas pendientes', scoped(request.user, 'visitas', Visita.objects.filter(estado_visita__nombre='Pendiente')).count()))
+            alerts.append(('Visitas pendientes', scoped(request.user, 'visitas', Visita.objects.filter(autorizada=False, estado_visita__nombre='Pendiente')).count()))
     else:
         if allowed(request.user, 'visitas', 'ver'):
-            alerts.append(('Visitas pendientes', scoped(request.user, 'visitas', Visita.objects.filter(estado_visita__nombre='Pendiente')).count()))
+            alerts.append(('Visitas pendientes', scoped(request.user, 'visitas', Visita.objects.filter(autorizada=False, estado_visita__nombre='Pendiente')).count()))
     ctx = {**context(request), 'counts': counts, 'recent': recent[:10], 'alerts': alerts, 'role_slug': role_slug}
     return render(request, f'dashboards/{role_slug}.html', ctx)
 
@@ -587,6 +1129,7 @@ def module_view(request, slug):
             **context(request),
             'title': 'Mi apartamento',
             'slug': slug,
+            'vinculos': mis_links,
             'mis_apartamento_links': mis_links,
             'familiares': familiares,
             'qf': qf,
@@ -596,7 +1139,11 @@ def module_view(request, slug):
         })
 
     title, model = MODULES[slug]
+    if slug == 'residentes' and rol_nombre == 'Residente':
+        title = 'Familiares'
     qs = scoped(request.user, slug, model.objects.all())
+    if slug == 'residentes' and rol_nombre == 'Residente':
+        qs = qs.filter(tipo_residente__nombre__iexact='Familiar', fecha_salida__isnull=True)
     q = request.GET.get('q', '').strip()[:100]
     status = request.GET.get('estado', '').strip()[:30]
     persona_tipo_documento = request.GET.get('tipo_documento', '').strip()
@@ -610,6 +1157,9 @@ def module_view(request, slug):
     paquete_estado = request.GET.get('paquete_estado', request.GET.get('estado', '')).strip()
     recibido_desde = request.GET.get('recibido_desde', '').strip()
     recibido_hasta = request.GET.get('recibido_hasta', '').strip()
+    recibo_vista = request.GET.get('vista', 'todos').strip()
+    if recibo_vista not in ('todos', 'revision'):
+        recibo_vista = 'todos'
 
     if q:
         condition = Q()
@@ -643,6 +1193,14 @@ def module_view(request, slug):
             qs = qs.filter(fecha_salida__isnull=True)
         elif asignacion_estado in ('inactivo', 'inactiva', 'salida', 'retirado', '0', 'no', 'false'):
             qs = qs.filter(fecha_salida__isnull=False)
+    elif slug == 'visitas':
+        qs = apply_visita_filters(request, qs)
+    elif slug == 'reservas':
+        if rol_nombre == 'Vigilante':
+            if status:
+                qs = qs.filter(estado_reserva__nombre=status)
+        else:
+            qs = apply_reserva_filters(request, qs)
     elif slug == 'paquetes':
         if paquete_torre.isdecimal():
             qs = qs.filter(apartamento__torre_id=int(paquete_torre))
@@ -660,7 +1218,16 @@ def module_view(request, slug):
             qs = qs.filter(fecha_recepcion__date__gte=d1)
         if d2:
             qs = qs.filter(fecha_recepcion__date__lte=d2)
-    elif status and slug in STATUS:
+    elif slug == 'recibos':
+        if rol_nombre == 'Administrador':
+            if recibo_vista == 'revision':
+                qs = qs.filter(estado_recibo__nombre='Pendiente por revisar')
+            else:
+                qs = qs.exclude(estado_recibo__nombre='Pendiente por revisar')
+        else:
+            recibo_vista = 'todos'
+        qs = apply_recibo_filters(request, qs, rol_nombre)
+    elif status and slug in STATUS and slug != 'visitas':
         qs = qs.filter(**{STATUS[slug]: status})
 
     active_relations = {}
@@ -677,6 +1244,12 @@ def module_view(request, slug):
         if slug == 'paquetes':
             # Filtros dedicados en UI (estado, torre, recibido desde/hasta).
             continue
+        if slug == 'recibos':
+            # Filtros dedicados en UI (servicio, estado, torre, vencimiento y valor).
+            continue
+        if slug == 'reservas':
+            # Filtros dedicados en UI para zona, estado, fechas y número de invitados.
+            continue
         raw = request.GET.get(field, '')
         if raw.isdecimal():
             lookup = field if field.endswith('_id') else f'{field}_id'
@@ -684,7 +1257,13 @@ def module_view(request, slug):
             active_relations[field] = raw
 
     resident_groups = None
-    if slug == 'residentes':
+    if slug == 'residentes' and rol_nombre == 'Residente':
+        items = list(
+            qs.select_related(
+                'persona', 'persona__tipo_documento', 'apartamento__torre', 'tipo_residente'
+            ).order_by('persona__apellidos', 'persona__nombres')[:100]
+        )
+    elif slug == 'residentes':
         person_ids = list(qs.order_by('persona_id').values_list('persona_id', flat=True).distinct()[:100])
         relations = list(
             qs.filter(persona_id__in=person_ids)
@@ -721,10 +1300,30 @@ def module_view(request, slug):
                 qs.select_related('apartamento', 'apartamento__torre', 'persona', 'tipo_residente')
                 .order_by('apartamento__torre__nombre_torre', 'apartamento__numero_apartamento', '-fecha_ingreso', 'persona__apellidos', 'persona__nombres')[:100]
             )
+        elif slug == 'visitas':
+            items = list(
+                qs.select_related('tipo_visita', 'tipo_documento', 'apartamento__torre', 'estado_visita')
+                .order_by('-fecha_ingreso', '-pk')[:100]
+            )
+        elif slug == 'reservas':
+            items = list(
+                qs.select_related('zona', 'apartamento__torre', 'estado_reserva')
+                .order_by('-fecha_reserva', 'hora_inicio', '-pk')[:100]
+            )
         elif slug == 'paquetes':
             items = list(
                 qs.select_related('apartamento', 'apartamento__torre', 'estado_paquete', 'persona', 'persona__tipo_documento')
                 .order_by('-fecha_recepcion', '-pk')[:100]
+            )
+        elif slug == 'recibos':
+            items = list(
+                qs.select_related('tipo_servicio', 'apartamento', 'apartamento__torre', 'estado_recibo')
+                .order_by('-fecha_vencimiento', '-pk')[:100]
+            )
+        elif slug == 'usuarios':
+            items = list(
+                qs.select_related('persona', 'persona__tipo_documento', 'rol', 'estado_usuario')
+                .order_by('-pk')[:100]
             )
         elif is_composite_model(model):
             items = list(qs[:100])
@@ -739,11 +1338,19 @@ def module_view(request, slug):
     elif slug == 'recibos':
         states = [(e.nombre, e.nombre) for e in EstadoRecibo.objects.all().order_by('id_estado_recibo')]
     elif slug == 'reservas':
-        states = [(e.nombre, e.nombre) for e in EstadoReserva.objects.all().order_by('id_estado_reserva')]
+        states = [
+            (e.nombre, e.nombre)
+            for e in EstadoReserva.objects.filter(
+                nombre__in=('Pendiente', 'Aprobada', 'Cancelada')
+            ).order_by('id_estado_reserva')
+        ]
 
     rows = []
     for obj in items:
-        rows.append({'item': obj, 'key': object_key(model, obj), 'links': related_links(request.user, slug, obj, request)})
+        row = {'item': obj, 'key': object_key(model, obj), 'links': related_links(request.user, slug, obj, request)}
+        if slug == 'visitas':
+            row['visita_estado_display'] = visita_estado_display(obj)
+        rows.append(row)
 
     persona_tipo_documentos = list(TipoDocumento.objects.all().order_by('id_tipo_documento')) if slug == 'personas' else []
     persona_estado_choices = [('activo', 'Activo'), ('inactivo', 'Inactivo')] if slug == 'personas' else []
@@ -754,6 +1361,15 @@ def module_view(request, slug):
     asignacion_estado_choices = [('activo', 'Activo (en apartamento)'), ('salida', 'Con salida / inactivo')] if slug == 'residentes_apartamentos' else []
     paquete_torres = list(Torre.objects.all().order_by('nombre_torre')) if slug == 'paquetes' else []
     paquete_estado_choices = [(e.nombre, e.nombre) for e in EstadoPaquete.objects.all().order_by('id_estado_paquete')] if slug == 'paquetes' else []
+    recibo_servicios = list(
+        TipoServicio.objects.filter(
+            nombre__in=('Administración', 'Agua', 'Luz', 'Gas', 'Internet')
+        ).order_by('nombre')
+    ) if slug == 'recibos' else []
+    recibo_torres = list(Torre.objects.all().order_by('nombre_torre')) if slug == 'recibos' and rol_nombre != 'Residente' else []
+    visita_tipos = list(TipoVisita.objects.all().order_by('nombre')) if slug == 'visitas' else []
+    visita_torres = list(Torre.objects.all().order_by('nombre_torre')) if slug == 'visitas' else []
+    reserva_zonas = list(ZonaComun.objects.all().order_by('nombre')) if slug == 'reservas' else []
 
     can_create = allowed(request.user, slug, 'crear')
     can_edit = allowed(request.user, slug, 'editar')
@@ -766,7 +1382,26 @@ def module_view(request, slug):
         can_create = False
         can_edit = False
         can_delete = False
-
+    if slug == 'recibos' and _rol_nombre == 'Residente':
+        can_create = False
+        can_edit = False
+        can_delete = False
+    visita_tipo = request.GET.get('visita_tipo', '').strip()
+    visita_estado = request.GET.get('visita_estado', '').strip()
+    visita_torre = request.GET.get('visita_torre', '').strip()
+    ingreso_desde = request.GET.get('ingreso_desde', '').strip()
+    salida_desde = request.GET.get('salida_desde', '').strip()
+    reserva_zona = request.GET.get('reserva_zona', '').strip()
+    reserva_estado = request.GET.get('reserva_estado', '').strip()
+    reserva_desde = request.GET.get('reserva_desde', '').strip()
+    reserva_hasta = request.GET.get('reserva_hasta', '').strip()
+    invitados_minimos = request.GET.get('invitados_minimos', '').strip()
+    recibo_servicio = request.GET.get('recibo_servicio', '').strip()
+    recibo_estado = request.GET.get('recibo_estado', '').strip()
+    recibo_torre = request.GET.get('recibo_torre', '').strip()
+    vence_desde = request.GET.get('vence_desde', '').strip()
+    vence_hasta = request.GET.get('vence_hasta', '').strip()
+    valor_minimo = request.GET.get('valor_minimo', '').strip()
     return render(request, 'module.html', {
         **context(request), 'title': title, 'slug': slug, 'rows': rows,
         'resident_groups': resident_groups, 'active_relations': active_relations,
@@ -797,6 +1432,29 @@ def module_view(request, slug):
         'paquete_estado': paquete_estado,
         'recibido_desde': recibido_desde,
         'recibido_hasta': recibido_hasta,
+        'recibo_vista': recibo_vista,
+        'recibo_servicios': recibo_servicios,
+        'recibo_torres': recibo_torres,
+        'recibo_servicio': recibo_servicio,
+        'recibo_estado': recibo_estado,
+        'recibo_torre': recibo_torre,
+        'vence_desde': vence_desde,
+        'vence_hasta': vence_hasta,
+        'valor_minimo': valor_minimo,
+        'visita_tipos': visita_tipos,
+        'visita_torres': visita_torres,
+        'visita_estado_choices': VISIT_STATUS_FILTERS,
+        'visita_tipo': visita_tipo,
+        'visita_estado': visita_estado,
+        'visita_torre': visita_torre,
+        'ingreso_desde': ingreso_desde,
+        'salida_desde': salida_desde,
+        'reserva_zonas': reserva_zonas,
+        'reserva_zona': reserva_zona,
+        'reserva_estado': reserva_estado,
+        'reserva_desde': reserva_desde,
+        'reserva_hasta': reserva_hasta,
+        'invitados_minimos': invitados_minimos,
     })
 
 
@@ -814,8 +1472,8 @@ def save_form(request, slug, instance=None):
         return HttpResponseForbidden('Sin permiso para modificar este módulo')
     title, model = MODULES[slug]
     _rol_obj, rol_nombre, _slug_role = resolve_schema_role(request.user)
-    if instance and rol_nombre == 'Residente' and slug == 'reservas':
-        return HttpResponseForbidden('No puedes modificar reservas existentes')
+    if slug == 'recibos' and rol_nombre not in ('Administrador', 'Vigilante'):
+        return HttpResponseForbidden('Solo el administrador y el vigilante pueden registrar o editar recibos')
 
     if slug == 'usuarios':
         Form = UsuarioForm
@@ -840,17 +1498,21 @@ def save_form(request, slug, instance=None):
             initial['apartamento'] = ids[0]
 
     form_kwargs = {'instance': instance, 'initial': initial}
-    if slug in ('residentes', 'paquetes'):
+    if slug in ('residentes', 'paquetes', 'reservas'):
         form_kwargs['usuario'] = request.user
+    if slug in ('visitas', 'reservas'):
+        form_kwargs['rol_actual'] = rol_nombre
     if slug == 'usuarios':
         form_kwargs['rol_actual'] = rol_nombre
     if slug == 'paquetes' and rol_nombre == 'Residente':
         return HttpResponseForbidden('No puedes registrar ni modificar paquetes')
     form = Form(request.POST or None, **form_kwargs)
     if slug == 'visitas':
-        apply_visit_rules(form, rol_nombre)
-        if 'autorizada' in form.fields:
-            form.fields['autorizada'].initial = bool(instance and _estado_nombre(instance, 'estado_visita') != 'Pendiente')
+        form.fields['estado_display'].initial = (
+            visita_estado_display(instance)
+            if instance
+            else ('Autorizada' if rol_nombre == 'Residente' else 'Pendiente por autorizar')
+        )
 
     if slug == 'residentes' and rol_nombre == 'Residente':
         ids = apartamentos_autorizados(request.user)
@@ -866,33 +1528,31 @@ def save_form(request, slug, instance=None):
             if len(ids) == 1:
                 form.fields['apartamento'].disabled = True
                 form.fields['apartamento'].initial = ids[0]
-        if 'estado_visita' in form.fields:
-            form.fields['estado_visita'].queryset = EstadoVisita.objects.filter(nombre__in=['Pendiente'])
     if slug == 'visitas' and rol_nombre == 'Vigilante':
         if instance and 'apartamento' in form.fields:
             form.fields['apartamento'].disabled = True
-        if 'estado_visita' in form.fields:
-            form.fields['estado_visita'].queryset = EstadoVisita.objects.filter(nombre__in=['Pendiente', 'Ingresó', 'Finalizada'])
     if rol_nombre == 'Residente' and slug == 'reservas':
-        ids = apartamentos_autorizados(request.user)
-        if not ids:
+        if not apartamentos_autorizados(request.user):
             return HttpResponseForbidden('No tienes un apartamento autorizado')
-        if 'apartamento' in form.fields:
-            form.fields['apartamento'].queryset = Apartamento.objects.filter(pk__in=ids)
-            if len(ids) == 1:
-                form.fields['apartamento'].disabled = True
-                form.fields['apartamento'].initial = ids[0]
-        if 'estado_reserva' in form.fields:
-            form.fields['estado_reserva'].queryset = EstadoReserva.objects.filter(nombre='Pendiente')
-            pendiente = EstadoReserva.objects.filter(nombre='Pendiente').first()
-            if pendiente:
-                form.fields['estado_reserva'].initial = pendiente
 
     modal_persona = slug == 'personas' and (request.GET.get('modal') == '1' or request.POST.get('modal') == '1')
     modal_torre = slug == 'torres' and bool(instance) and (request.GET.get('modal') == '1' or request.POST.get('modal') == '1')
     modal_apartamento = slug == 'apartamentos' and (request.GET.get('modal') == '1' or request.POST.get('modal') == '1')
     modal_asignacion = slug == 'residentes_apartamentos' and (request.GET.get('modal') == '1' or request.POST.get('modal') == '1')
     modal_paquete = slug == 'paquetes' and (request.GET.get('modal') == '1' or request.POST.get('modal') == '1')
+    modal_usuario = slug == 'usuarios' and (
+        request.GET.get('modal') == '1' or request.POST.get('modal') == '1'
+    )
+    modal_reserva = slug == 'reservas' and (
+        request.GET.get('modal') == '1' or request.POST.get('modal') == '1'
+    )
+    modal_zona = slug == 'zonas' and (request.GET.get('modal') == '1' or request.POST.get('modal') == '1')
+    modal_visita = slug == 'visitas' and (
+        request.GET.get('modal') == '1' or request.POST.get('modal') == '1'
+    )
+    modal_recibo = slug == 'recibos' and (
+        request.GET.get('modal') == '1' or request.POST.get('modal') == '1'
+    )
 
     if request.method == 'POST' and form.is_valid():
         if slug == 'usuarios':
@@ -901,46 +1561,87 @@ def save_form(request, slug, instance=None):
             messages.success(request, 'Usuario guardado correctamente')
             return redirect(f"{request.resolver_match.namespace}:module", slug='usuarios')
 
+        previous_paquete_status = (
+            getattr(getattr(instance, 'estado_paquete', None), 'nombre', '')
+            if slug == 'paquetes' and instance
+            else ''
+        )
         obj = form.save(commit=False)
+        if slug == 'recibos' and instance is None:
+            estado_pendiente = EstadoRecibo.objects.filter(nombre__iexact='Pendiente').first()
+            if estado_pendiente is None:
+                form.add_error(None, 'Falta el estado de recibo "Pendiente" en la base de datos.')
+                template = 'recibos/form_modal.html' if modal_recibo else 'form.html'
+                response = render(request, template, {
+                    **context(request), 'title': title, 'form': form, 'slug': slug,
+                    'editing': False,
+                })
+                response.status_code = 400
+                return response
+            obj.estado_recibo = estado_pendiente
+        if rol_nombre == 'Residente' and slug == 'reservas':
+            apartment_ids = apartamentos_autorizados(request.user)
+            if 'apartamento' in form.cleaned_data:
+                obj.apartamento = form.cleaned_data['apartamento']
+            elif instance is None and apartment_ids:
+                obj.apartamento = get_object_or_404(Apartamento, pk=apartment_ids[0])
         if rol_nombre == 'Residente' and slug in ('residentes', 'residentes_apartamentos', 'visitas', 'reservas'):
             ids = apartamentos_autorizados(request.user)
             if getattr(obj, 'apartamento_id', None) not in ids:
                 return HttpResponseForbidden('Apartamento no autorizado')
 
         if rol_nombre == 'Residente' and slug == 'reservas':
-            pendiente = EstadoReserva.objects.filter(nombre='Pendiente').first()
-            if pendiente:
+            if instance is None:
+                pendiente = EstadoReserva.objects.filter(nombre__iexact='Pendiente').first()
+                if pendiente is None:
+                    form.add_error(None, 'Falta el estado de reserva "Pendiente" en la base de datos.')
+                    if modal_reserva:
+                        response = render(request, 'reservas/form_modal.html', {
+                            **context(request), 'title': title, 'form': form, 'slug': slug,
+                            'editing': False,
+                        })
+                        response.status_code = 400
+                        return response
+                    return render(request, 'form.html', {
+                        **context(request), 'title': title, 'form': form, 'slug': slug,
+                        'editing': False,
+                    })
                 obj.estado_reserva = pendiente
 
         if slug == 'visitas':
-            estado_nombre = getattr(getattr(obj, 'estado_visita', None), 'nombre', '')
-            if rol_nombre == 'Residente':
-                obj.autorizada = bool(form.cleaned_data.get('autorizada'))
-                if estado_nombre not in ('Pendiente',):
-                    pendiente = EstadoVisita.objects.filter(nombre='Pendiente').first()
-                    if pendiente:
-                        obj.estado_visita = pendiente
-                        estado_nombre = 'Pendiente'
-            elif rol_nombre == 'Vigilante':
-                if estado_nombre == 'Ingresó':
-                    if not (obj.autorizada or (instance and getattr(instance, 'estado_visita', None) and instance.estado_visita.nombre == 'Ingresó')):
-                        form.add_error('estado_visita', 'La visita debe estar autorizada antes del ingreso.')
-                        if modal_persona:
-                            resp = render(request, 'personas/edit_modal_form.html', {**context(request), 'title': title, 'form': form, 'slug': slug, 'editing': bool(instance), 'modal_persona': True})
-                            resp.status_code = 400
-                            return resp
-                        return render(request, 'form.html', {**context(request), 'title': title, 'form': form, 'slug': slug, 'editing': bool(instance)})
-                if estado_nombre == 'Finalizada' and (not instance or not getattr(instance, 'estado_visita', None) or instance.estado_visita.nombre != 'Ingresó'):
-                    form.add_error('estado_visita', 'Primero registra el ingreso.')
-                    if modal_persona:
-                        resp = render(request, 'personas/edit_modal_form.html', {**context(request), 'title': title, 'form': form, 'slug': slug, 'editing': bool(instance), 'modal_persona': True})
+            if instance is None:
+                estado_pendiente = EstadoVisita.objects.filter(nombre__iexact='Pendiente').first()
+                if estado_pendiente is None:
+                    form.add_error(None, 'Falta el estado de visita "Pendiente" en la base de datos.')
+                    if modal_visita:
+                        resp = render(request, 'visitas/form_modal.html', {
+                            **context(request), 'title': title, 'form': form, 'slug': slug,
+                            'editing': False, 'modal_visita': True,
+                        })
                         resp.status_code = 400
                         return resp
-                    return render(request, 'form.html', {**context(request), 'title': title, 'form': form, 'slug': slug, 'editing': bool(instance)})
-            if estado_nombre == 'Ingresó' and not obj.fecha_ingreso:
-                obj.fecha_ingreso = timezone.now()
-            if estado_nombre == 'Finalizada' and not obj.fecha_salida:
-                obj.fecha_salida = timezone.now()
+                    return render(request, 'form.html', {
+                        **context(request), 'title': title, 'form': form, 'slug': slug, 'editing': False,
+                    })
+                obj.estado_visita = estado_pendiente
+                obj.autorizada = rol_nombre == 'Residente'
+            if obj.fecha_salida and rol_nombre in ('Administrador', 'Vigilante'):
+                estado_finalizada = EstadoVisita.objects.filter(nombre__iexact='Finalizada').first()
+                if estado_finalizada is None:
+                    form.add_error(None, 'Falta el estado de visita "Finalizada" en la base de datos.')
+                    if modal_visita:
+                        resp = render(request, 'visitas/form_modal.html', {
+                            **context(request), 'title': title, 'form': form, 'slug': slug,
+                            'editing': bool(instance), 'modal_visita': True,
+                        })
+                        resp.status_code = 400
+                        return resp
+                    return render(request, 'form.html', {
+                        **context(request), 'title': title, 'form': form, 'slug': slug,
+                        'editing': bool(instance),
+                    })
+                obj.estado_visita = estado_finalizada
+                obj.autorizada = True
 
         if slug == 'paquetes':
             estado_nombre = getattr(getattr(obj, 'estado_paquete', None), 'nombre', '')
@@ -955,6 +1656,13 @@ def save_form(request, slug, instance=None):
                 obj.persona = None
 
         obj.save()
+        if slug == 'paquetes':
+            schedule_package_received_email(
+                obj.pk,
+                created=instance is None,
+                previous_status=previous_paquete_status,
+                current_status=getattr(getattr(obj, 'estado_paquete', None), 'nombre', ''),
+            )
         if hasattr(form, 'save_m2m'):
             try:
                 form.save_m2m()
@@ -962,6 +1670,15 @@ def save_form(request, slug, instance=None):
                 pass
         messages.success(request, 'Registro guardado correctamente')
         return redirect(f"{request.resolver_match.namespace}:module", slug=slug)
+
+    if modal_usuario:
+        status_code = 400 if request.method == 'POST' else 200
+        response = render(request, 'usuarios/form_modal.html', {
+            **context(request), 'title': title, 'form': form, 'slug': slug,
+            'editing': bool(instance),
+        })
+        response.status_code = status_code
+        return response
 
     if modal_persona:
         status_code = 400 if request.method == 'POST' else 200
@@ -1003,11 +1720,136 @@ def save_form(request, slug, instance=None):
         resp.status_code = status_code
         return resp
 
+    if modal_reserva:
+        status_code = 400 if request.method == 'POST' else 200
+        response = render(request, 'reservas/form_modal.html', {
+            **context(request), 'title': title, 'form': form, 'slug': slug,
+            'editing': bool(instance),
+        })
+        response.status_code = status_code
+        return response
+
+    if modal_recibo:
+        status_code = 400 if request.method == 'POST' else 200
+        response = render(request, 'recibos/form_modal.html', {
+            **context(request), 'title': title, 'form': form, 'slug': slug,
+            'editing': bool(instance),
+        })
+        response.status_code = status_code
+        return response
+
+    if modal_zona:
+        status_code = 400 if request.method == 'POST' else 200
+        resp = render(request, 'zonas/form_modal.html', {
+            **context(request), 'title': title, 'form': form, 'slug': slug, 'editing': bool(instance),
+        })
+        resp.status_code = status_code
+        return resp
+
+    if modal_visita:
+        status_code = 400 if request.method == 'POST' else 200
+        resp = render(request, 'visitas/form_modal.html', {
+            **context(request), 'title': title, 'form': form, 'slug': slug,
+            'editing': bool(instance), 'modal_visita': True,
+        })
+        resp.status_code = status_code
+        return resp
+
     return render(request, 'form.html', {**context(request), 'title': title, 'form': form, 'slug': slug, 'editing': bool(instance)})
+
+
+@transaction.atomic
+def familiar_form_view(request, instance=None):
+    denied = role_required_view(request, request.resolver_match.namespace)
+    if denied:
+        return denied
+    _rol, rol_nombre, _slug_role = resolve_schema_role(request.user)
+    if rol_nombre != 'Residente':
+        return HttpResponseForbidden('Este formulario es exclusivo para residentes')
+    action = 'editar' if instance else 'crear'
+    if not allowed(request.user, 'residentes', action):
+        return HttpResponseForbidden('Sin permiso para gestionar familiares')
+
+    apartment_ids = apartamentos_autorizados(request.user)
+    if not apartment_ids:
+        return HttpResponseForbidden('No tienes un apartamento autorizado')
+    if instance and (
+        instance.apartamento_id not in apartment_ids
+        or getattr(getattr(instance, 'tipo_residente', None), 'nombre', '').lower() != 'familiar'
+        or instance.fecha_salida is not None
+    ):
+        return HttpResponseForbidden('No puedes modificar este vínculo familiar')
+
+    form = FamiliarForm(
+        request.POST or None,
+        apartment_ids=apartment_ids,
+        instance=instance,
+    )
+    modal = request.GET.get('modal') == '1' or request.POST.get('modal') == '1'
+    title = 'Editar familiar' if instance else 'Registrar familiar'
+    if request.method == 'POST' and form.is_valid():
+        tipo_familiar = TipoResidente.objects.filter(nombre__iexact='Familiar').first()
+        if tipo_familiar is None:
+            form.add_error(None, 'Falta el tipo de residente "Familiar" en la base de datos.')
+        else:
+            data = form.cleaned_data
+            persona = instance.persona if instance else Persona.objects.filter(
+                tipo_documento=data['tipo_documento'],
+                numero_documento=data['numero_documento'],
+            ).first()
+            apartamento = (
+                data.get('apartamento')
+                if 'apartamento' in form.fields
+                else (instance.apartamento if instance else get_object_or_404(Apartamento, pk=apartment_ids[0]))
+            )
+            duplicate_link = (
+                ApartamentoPersona.objects.filter(apartamento=apartamento, persona=persona).exists()
+                if persona and instance is None
+                else False
+            )
+            if duplicate_link:
+                form.add_error(None, 'Esta persona ya está vinculada a ese apartamento.')
+            else:
+                if persona is None:
+                    persona = Persona()
+                persona.tipo_documento = data['tipo_documento']
+                persona.numero_documento = data['numero_documento']
+                persona.nombres = data['nombres']
+                persona.apellidos = data['apellidos']
+                persona.telefono = data['telefono']
+                persona.correo = data['correo']
+                persona.save()
+                if instance is None:
+                    ApartamentoPersona.objects.create(
+                        apartamento=apartamento,
+                        persona=persona,
+                        tipo_residente=tipo_familiar,
+                        fecha_ingreso=timezone.localdate(),
+                    )
+                    messages.success(request, 'Familiar registrado en el apartamento.')
+                else:
+                    messages.success(request, 'Información del familiar actualizada.')
+                return redirect(f"{request.resolver_match.namespace}:module", slug='residentes')
+
+    if modal:
+        response = render(request, 'residentes/familiar_form_modal.html', {
+            **context(request), 'title': title, 'form': form, 'slug': 'residentes',
+            'editing': bool(instance),
+        })
+        if request.method == 'POST':
+            response.status_code = 400
+        return response
+    return render(request, 'form.html', {
+        **context(request), 'title': title, 'form': form, 'slug': 'residentes',
+        'editing': bool(instance),
+    })
 
 
 @login_required
 def create_view(request, slug):
+    _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+    if slug == 'residentes' and rol_nombre == 'Residente':
+        return familiar_form_view(request)
     return save_form(request, slug)
 
 
@@ -1015,10 +1857,13 @@ def create_view(request, slug):
 def edit_view(request, slug, pk):
     if slug not in MODULES:
         raise Http404
+    _rol_obj, rol_nombre, _slug_role = resolve_schema_role(request.user)
+    if slug == 'residentes' and rol_nombre == 'Residente':
+        obj = get_object_by_key(MODULES[slug][1], pk)
+        return familiar_form_view(request, obj)
     if not allowed(request.user, slug, 'editar'):
         return HttpResponseForbidden('Sin permiso')
     obj = get_object_by_key(MODULES[slug][1], pk)
-    _rol_obj, rol_nombre, _slug_role = resolve_schema_role(request.user)
     if rol_nombre == 'Residente':
         apt_id = getattr(obj, 'apartamento_id', None)
         if apt_id and apt_id not in apartamentos_autorizados(request.user):
@@ -1038,19 +1883,42 @@ def delete_view(request, slug, pk):
         messages.error(request, 'Las personas no se eliminan; desactívalas desde la edición o con el botón de estado para conservar el historial.')
         return redirect(f"{request.resolver_match.namespace}:module", slug=slug)
     _rol_obj, rol_nombre, _slug_role = resolve_schema_role(request.user)
+    if slug == 'recibos' and rol_nombre not in ('Administrador', 'Vigilante'):
+        return HttpResponseForbidden('Solo el administrador y el vigilante pueden eliminar recibos')
     if slug == 'paquetes' and rol_nombre == 'Residente':
         return HttpResponseForbidden('No puedes eliminar paquetes')
+    if slug == 'reservas' and rol_nombre == 'Residente':
+        return HttpResponseForbidden('Los residentes pueden cancelar sus reservas, pero no eliminarlas')
     if not allowed(request.user, slug, 'eliminar'):
         return HttpResponseForbidden('Sin permiso')
     obj = get_object_by_key(MODULES[slug][1], pk)
     if slug == 'usuarios' and obj.pk == getattr(request.user, 'pk', None):
         return HttpResponseForbidden('No puedes eliminar tu propia cuenta')
+    if slug == 'residentes' and rol_nombre == 'Residente':
+        if obj.apartamento_id not in apartamentos_autorizados(request.user):
+            return HttpResponseForbidden('No puedes eliminar vínculos de otro apartamento')
+        if getattr(getattr(obj, 'tipo_residente', None), 'nombre', '').lower() != 'familiar':
+            return HttpResponseForbidden('Solo puedes eliminar vínculos de familiares')
+    if slug == 'visitas' and rol_nombre == 'Residente':
+        if obj.apartamento_id not in apartamentos_autorizados(request.user):
+            return HttpResponseForbidden('No puedes eliminar visitas de otro apartamento')
     from django.db.models.deletion import ProtectedError
+    comprobante_path = obj.comprobante if slug == 'recibos' else None
     try:
         obj.delete()
-        messages.success(request, 'Registro eliminado')
     except ProtectedError:
         messages.error(request, 'No se puede eliminar: existen registros relacionados.')
+    else:
+        if comprobante_path:
+            try:
+                default_storage.delete(comprobante_path)
+            except OSError:
+                logger.exception('No se pudo borrar el comprobante del recibo %s', pk)
+                messages.warning(request, 'Recibo eliminado, pero no se pudo borrar el archivo del comprobante.')
+            else:
+                messages.success(request, 'Recibo eliminado')
+        else:
+            messages.success(request, 'Registro eliminado')
     return redirect(f"{request.resolver_match.namespace}:module", slug=slug)
 
 
@@ -1209,7 +2077,17 @@ def reporte_pdf(request, slug):
             cond |= Q(**{field + '__icontains': q})
         qs = qs.filter(cond)
     status = request.GET.get('estado', '').strip()[:30]
-    if status and slug in STATUS:
+    if slug == 'visitas':
+        qs = apply_visita_filters(request, qs)
+    elif slug == 'recibos':
+        _rol, rol_nombre, _role_slug = resolve_schema_role(request.user)
+        recibo_vista = request.GET.get('vista', 'todos').strip()
+        if rol_nombre == 'Administrador' and recibo_vista == 'revision':
+            qs = qs.filter(estado_recibo__nombre='Pendiente por revisar')
+        elif rol_nombre == 'Administrador':
+            qs = qs.exclude(estado_recibo__nombre='Pendiente por revisar')
+        qs = apply_recibo_filters(request, qs, rol_nombre)
+    elif status and slug in STATUS:
         qs = qs.filter(**{STATUS[slug]: status})
     for field in FILTERS.get(slug, ()):
         raw = request.GET.get(field, '')
@@ -1223,13 +2101,15 @@ def reporte_pdf(request, slug):
         'residentes_apartamentos': ['apartamento', 'persona', 'tipo_residente', 'fecha_ingreso', 'fecha_salida'],
         'torres': ['nombre_torre'],
         'apartamentos': ['torre', 'numero_apartamento', 'piso', 'activo'],
-        'visitas': ['nombre_visitante', 'documento_visitante', 'tipo_visita', 'apartamento', 'estado_visita', 'autorizada', 'fecha_ingreso'],
+        'visitas': ['nombre_visitante', 'tipo_visita', 'tipo_documento', 'documento_visitante', 'apartamento', 'motivo_visita', 'fecha_ingreso', 'fecha_salida', 'estado_visita', 'autorizada'],
         'paquetes': ['descripcion', 'remitente', 'apartamento', 'persona', 'estado_paquete', 'fecha_recepcion', 'fecha_entrega'],
         'reservas': ['zona', 'apartamento', 'fecha_reserva', 'hora_inicio', 'hora_fin', 'cantidad_invitados', 'estado_reserva'],
         'recibos': ['apartamento', 'tipo_servicio', 'periodo', 'valor', 'fecha_emision', 'fecha_vencimiento', 'estado_recibo'],
         'zonas': ['nombre', 'descripcion'],
-        'usuarios': ['username', 'first_name', 'last_name', 'email', 'is_active'],
+        'usuarios': ['username', 'estado_usuario', 'persona', 'rol'],
     }.get(slug, [])
+    if slug == 'usuarios':
+        qs = qs.select_related('persona', 'rol', 'estado_usuario')
     qs = qs[:2000]
     buffer = BytesIO()
     pdf = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=25, rightMargin=25, topMargin=32, bottomMargin=32)
@@ -1253,6 +2133,8 @@ def reporte_pdf(request, slug):
             value = getattr(obj, field, '')
             if value is None:
                 value = ''
+            if slug == 'visitas' and field == 'estado_visita':
+                value = visita_estado_display(obj)
             if isinstance(value, bool):
                 value = 'Sí' if value else 'No'
             row.append(str(value)[:95])

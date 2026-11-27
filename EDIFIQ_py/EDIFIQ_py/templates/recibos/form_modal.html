@@ -1,0 +1,20 @@
+<form method="post" action="{% if editing %}{% url role_ns|add:':edit' slug form.instance.pk %}?modal=1{% else %}{% url role_ns|add:':create' slug %}?modal=1{% endif %}" class="recibo-form">
+  {% csrf_token %}
+  <input type="hidden" name="modal" value="1">
+  {% if form.non_field_errors %}<div class="notice">{{ form.non_field_errors }}</div>{% endif %}
+  <div class="form-grid">
+    {% for field in form %}
+      <div class="field">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}
+        {% for error in field.errors %}<small class="error">{{ error }}</small>{% endfor %}
+      </div>
+    {% endfor %}
+  </div>
+  <p class="muted small">El recibo se registra con estado Pendiente. Las fechas y el valor se validan antes de guardar.</p>
+  <div class="actions">
+    <button class="primary" type="submit">{% if editing %}Guardar cambios{% else %}Registrar recibo{% endif %}</button>
+    <button class="secondary js-modal-cancel" type="button">Cancelar</button>
+  </div>
+</form>

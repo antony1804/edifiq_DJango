@@ -22,6 +22,7 @@ class Recibo(models.Model):
         on_delete=models.PROTECT,
         db_column='id_apartamento',
     )
+    comprobante = models.CharField(max_length=255, null=True, blank=True)
     fecha_creacion = models.DateTimeField(auto_now_add=True)
     fecha_actualizacion = models.DateTimeField(auto_now=True)
 

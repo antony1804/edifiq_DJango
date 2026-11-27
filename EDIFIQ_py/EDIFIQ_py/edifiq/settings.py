@@ -85,6 +85,7 @@ USE_I18N = True
 USE_TZ = True
 STATIC_URL = 'static/'
 STATICFILES_DIRS = [BASE_DIR / 'static']
+MEDIA_ROOT = BASE_DIR / 'private_media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'dashboard'
@@ -95,4 +96,15 @@ TEST_RUNNER = 'edifiq.test_runner.SchemaManagedTestRunner'
 SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
 MESSAGE_STORAGE = 'django.contrib.messages.storage.cookie.CookieStorage'
 
+EMAIL_BACKEND = os.environ.get(
+    'EMAIL_BACKEND',
+    'django.core.mail.backends.console.EmailBackend',
+)
+EMAIL_HOST = os.environ.get('EMAIL_HOST', '')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True').strip().lower() in ('1', 'true', 'yes', 'on')
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'webmaster@localhost')
+EMAIL_TIMEOUT = int(os.environ.get('EMAIL_TIMEOUT', '15'))
 

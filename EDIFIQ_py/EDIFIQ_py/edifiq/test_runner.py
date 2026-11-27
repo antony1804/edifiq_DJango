@@ -12,7 +12,7 @@ STUBBED_APPS = {
     'reservas': 'edifiq.test_migrations.reservas',
     'recibos': 'edifiq.test_migrations.recibos',
     'legado': 'edifiq.test_migrations.legado',
-    'usuarios': 'edifiq.test_migrations.usuarios',
+    'usuarios': None,
 }
 
 # Managed app models needed for tests but whose migrations are stubbed to avoid
@@ -29,7 +29,7 @@ class SchemaManagedTestRunner(DiscoverRunner):
     the real schema. For tests only (authorized), we:
     - disable incompatible/stub historical migrations for schema-mapped apps and
       usuarios (to avoid resolving schema relations during migrate),
-    - run Django migrations for contrib apps (auth, admin, sessions, contenttypes),
+    - run migrations for installed Django apps,
     - create required managed app tables (e.g. usuarios.Perfil) and unmanaged
       schema tables from current model definitions in the test database.
     """

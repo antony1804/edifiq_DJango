@@ -95,6 +95,7 @@ input:focus,select:focus,textarea:focus,.field-input:focus{outline:none;border-c
 
 /* Mensajes */
 .notice{background:#eaf8f0;color:#11643d;border:1px solid #b7e4c7;border-left:4px solid #14804a;padding:13px 16px;border-radius:7px;margin-bottom:16px;font-weight:600}
+.notice-error{background:#fff1f0;color:#b42318;border-color:#fecdca;border-left-color:#d92d20}
 .error,.form-panel .error,.content > .error{background:#fff1f0;color:#b42318;border:1px solid #fecdca;padding:11px 13px;border-radius:10px;margin-bottom:16px}
 
 /* Dashboard extras */

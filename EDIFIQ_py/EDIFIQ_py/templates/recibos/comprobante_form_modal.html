@@ -1,0 +1,14 @@
+<form method="post" enctype="multipart/form-data" action="{% url role_ns|add:':recibo_comprobante_upload' recibo.pk %}" class="recibo-comprobante-form">
+  {% csrf_token %}
+  {% if form.non_field_errors %}<div class="notice">{{ form.non_field_errors }}</div>{% endif %}
+  <div class="field">
+    <label for="{{ form.comprobante.id_for_label }}">{{ form.comprobante.label }}</label>
+    {{ form.comprobante }}
+    <small>JPG, PNG o WEBP; máximo 5 MB.</small>
+    {% for error in form.comprobante.errors %}<small class="error">{{ error }}</small>{% endfor %}
+  </div>
+  <div class="actions">
+    <button class="primary" type="submit">Enviar comprobante</button>
+    <button class="secondary js-modal-cancel" type="button">Cancelar</button>
+  </div>
+</form>

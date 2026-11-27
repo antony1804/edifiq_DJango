@@ -31,6 +31,9 @@
         <h2 style="margin:0">Mis familiares</h2>
         <p class="muted" style="margin:4px 0 0">Familiares registrados en tu apartamento</p>
       </div>
+      {% if can_manage_familiares %}
+        <button type="button" class="primary js-open-familiar-form" data-modal-title="Registrar familiar" data-modal-url="{% url role_ns|add:':create' 'residentes' %}?modal=1">+ Registrar familiar</button>
+      {% endif %}
     </div>
     <form class="filters" method="get" style="margin-bottom:14px">
       <input name="qf" value="{{ qf }}" placeholder="Buscar familiar (documento, nombre, teléfono, correo)..." aria-label="Buscar familiar">
@@ -41,6 +44,7 @@
       <table>
         <thead>
           <tr>
+            <th>Tipo de documento</th>
             <th>Número de documento</th>
             <th>Nombres</th>
             <th>Apellidos</th>
@@ -53,6 +57,7 @@
         <tbody>
           {% for f in familiares %}
             <tr>
+              <td>{{ f.persona.tipo_documento.abreviatura|default:f.persona.tipo_documento.nombre }}</td>
               <td>{{ f.persona.numero_documento|default:"-" }}</td>
               <td>{{ f.persona.nombres|default:"-" }}</td>
               <td>{{ f.persona.apellidos|default:"-" }}</td>
@@ -61,7 +66,7 @@
               <td>{{ f.fecha_ingreso|date:"d/m/Y" }}</td>
               <td>
                 {% if can_edit_familiar %}
-                  <a class="textlink" href="{% url role_ns|add:':edit' 'residentes' f.row_key %}">Editar</a>
+                  <button type="button" class="textlink js-open-familiar-form" data-modal-title="Editar familiar" data-modal-url="{% url role_ns|add:':edit' 'residentes' f.row_key %}?modal=1">Editar</button>
                 {% endif %}
                 {% if can_delete_familiar %}
                   <form class="inline" action="{% url role_ns|add:':delete' 'residentes' f.row_key %}" method="post" onsubmit="return confirm('¿Está seguro de eliminar este familiar? Esta acción no se puede deshacer.');">
@@ -76,7 +81,7 @@
             </tr>
           {% empty %}
             <tr>
-              <td colspan="7" class="empty">Aún no tienes familiares registrados</td>
+              <td colspan="8" class="empty">Aún no tienes familiares registrados</td>
             </tr>
           {% endfor %}
         </tbody>
@@ -88,4 +93,5 @@
     <p class="muted" style="margin:0;font-size:16px">No asignado</p>
   </div>
 {% endif %}
+{% include 'residentes/familiar_modal_shell.html' %}
 {% endblock %}
